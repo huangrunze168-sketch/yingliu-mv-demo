@@ -484,6 +484,7 @@ export function CreateFlowDemo() {
     if (assets.portrait[0]) body.append('portrait', assets.portrait[0]);
     assets.portrait.slice(1, 8).forEach((file, index) => body.append(`portrait_${index + 2}`, file));
     if (assets.reference) body.append('reference', assets.reference);
+    if (assets.voice) body.append('voice', assets.voice);
     try {
       const response = await fetch('/yingliu-demo-api/analyze', { method: 'POST', body });
       const payload = await response.json() as AgentAnalysis & { error?: string };

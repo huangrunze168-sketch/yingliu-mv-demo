@@ -421,8 +421,8 @@ SEEDANCE_MODEL_SPECS = {
 }
 
 MINIMAX_MODEL_SPECS = {
-    "minimax-h3-768p": {"resolution": "768p", "min_duration": 4, "max_duration": 15},
-    "minimax-h3-2k": {"resolution": "2k", "min_duration": 4, "max_duration": 15},
+    "minimax-h3-768p": {"resolution": "768P", "min_duration": 4, "max_duration": 15},
+    "minimax-h3-2k": {"resolution": "2K", "min_duration": 4, "max_duration": 15},
 }
 
 
@@ -492,13 +492,32 @@ def encode_multipart(fields: dict[str, str], file_field: tuple[str, pathlib.Path
     return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
 
+class UpstreamHTTPError(RuntimeError):
+    """已收到 ModelsNexus HTTP 响应，确认本次请求已结束。"""
+
+
+class UpstreamTransportError(Exception):
+    """网络结果未知；不能据此自动重试提交，避免重复扣费。"""
+
+
 def api_json(request: urllib.request.Request, timeout: int = 120) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            body = response.read().decode("utf-8", errors="replace")
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise UpstreamTransportError(f"上游返回了非 JSON 响应（HTTP {response.status}）") from exc
+            if not isinstance(payload, dict):
+                raise UpstreamTransportError("上游返回的 JSON 不是对象")
+            return payload
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1200]
-        raise RuntimeError(f"上游视频 API 请求失败（HTTP {exc.code}）：{detail}") from exc
+        request_id = str(exc.headers.get("X-Oneapi-Request-Id", "")).strip()
+        suffix = f"；请求 ID：{request_id}" if request_id else ""
+        raise UpstreamHTTPError(f"上游视频 API 请求失败（HTTP {exc.code}）：{detail}{suffix}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise UpstreamTransportError(f"ModelsNexus 网络结果未知：{exc}") from exc
 
 
 def modelsnexus_headers(api_key: str, content_type: str | None = None, idempotency_key: str | None = None) -> dict[str, str]:
@@ -583,9 +602,60 @@ def create_signed_asset_url(job_id: str, key: str, path: pathlib.Path) -> str:
         if isinstance(item, dict) and item.get("key") == key and int(item.get("expires_at", 0)) > int(time.time()) + 300:
             return f"{PUBLIC_API_BASE}/assets/{job_id}/{token}"
     token = uuid.uuid4().hex + uuid.uuid4().hex
-    signed_assets[token] = {"key": key, "filename": path.name, "expires_at": int(time.time()) + 7200}
+    # 上游可能排队较久；链接只允许读取单个任务目录中的指定文件，延长有效期不会扩大访问范围。
+    signed_assets[token] = {"key": key, "filename": path.name, "expires_at": int(time.time()) + 21600}
     write_state(job_id, signed_assets=signed_assets)
     return f"{PUBLIC_API_BASE}/assets/{job_id}/{token}"
+
+
+def build_models_nexus_content(job_id: str, directory: pathlib.Path, files: dict[str, str],
+                               prompt: str, include_song: bool = True) -> list[dict[str, Any]]:
+    """按 ModelsNexus 多模态内容结构组装全部同级参考素材。"""
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    portrait_keys = sorted(
+        (key for key in files if key.startswith("portrait")),
+        key=lambda key: (0 if key == "portrait" else int(key.rsplit("_", 1)[-1])),
+    )[:8]
+    for key in portrait_keys:
+        uri = create_signed_asset_url(job_id, key, directory / files[key])
+        content.append({"type": "image_url", "image_url": {"url": uri}, "role": "reference_image"})
+    if "reference" in files:
+        uri = create_signed_asset_url(job_id, "reference", directory / files["reference"])
+        content.append({"type": "video_url", "video_url": {"url": uri}, "role": "reference_video"})
+    audio_keys = [key for key in ("voice", "reference_audio", "song") if key in files]
+    if not include_song:
+        audio_keys = [key for key in audio_keys if key != "song"]
+    for key in audio_keys[:3]:
+        uri = create_signed_asset_url(job_id, key, directory / files[key])
+        content.append({"type": "audio_url", "audio_url": {"url": uri}, "role": "reference_audio"})
+    return content
+
+
+def seedance_payload(model: str, spec: dict[str, Any], ratio: str, duration: int,
+                     content: list[dict[str, Any]]) -> dict[str, Any]:
+    # ModelsNexus 的 OpenAI Video 兼容层直接接收 content。模型 ID 已固定清晰度，
+    # 不能再发送 prompt/output_format/resolution，否则会被严格参数校验拒绝。
+    return {
+        "model": model,
+        "content": content,
+        "duration": duration,
+        "ratio": ratio,
+        "generate_audio": True,
+        "mode": "reference",
+    }
+
+
+def minimax_payload(model: str, spec: dict[str, Any], ratio: str, duration: int,
+                    content: list[dict[str, Any]]) -> dict[str, Any]:
+    """MiniMax H3 原生多模态结构经 ModelsNexus `/v1/videos` 转发。"""
+    # minimax-h3-768p / minimax-h3-2k 已在模型 ID 中区分输出档位；
+    # 不再添加兼容端点不认识的 prompt、metadata、images 或 input_reference。
+    return {
+        "model": model,
+        "content": content,
+        "duration": duration,
+        "ratio": ratio,
+    }
 
 
 def submit_video_task(job_id: str, task_key: str, payload: dict[str, Any], api_key: str,
@@ -612,7 +682,7 @@ def submit_video_task(job_id: str, task_key: str, payload: dict[str, Any], api_k
     )
     try:
         response = api_json(request, timeout=180)
-    except RuntimeError as exc:
+    except UpstreamHTTPError as exc:
         # api_json 的 RuntimeError 只对应已收到的 HTTP 错误响应，因此确定没有未知的在途任务。
         tasks[task_key].update({"submission_state": "rejected", "error": str(exc)[:1200]})
         write_state(job_id, upstream_tasks=tasks)
@@ -643,7 +713,10 @@ def wait_and_download_video(job_id: str, task_key: str, upstream_id: str, api_ke
         raw_progress = response.get("progress", default_progress)
         if isinstance(raw_progress, str):
             raw_progress = raw_progress.rstrip("%")
-        upstream_progress = int(float(raw_progress or default_progress))
+        try:
+            upstream_progress = max(0, min(100, int(float(raw_progress or default_progress))))
+        except (TypeError, ValueError):
+            upstream_progress = default_progress
         state = read_state(job_id)
         tasks = state.get("upstream_tasks") if isinstance(state.get("upstream_tasks"), dict) else {}
         if isinstance(tasks.get(task_key), dict):
@@ -657,7 +730,12 @@ def wait_and_download_video(job_id: str, task_key: str, upstream_id: str, api_ke
             raise RuntimeError(f"上游视频生成失败：{response.get('error') or response.get('message') or status}")
         time.sleep(5)
     content = final_response.get("content") if isinstance(final_response.get("content"), dict) else {}
-    video_url = str(content.get("video_url") or "")
+    metadata = final_response.get("metadata") if isinstance(final_response.get("metadata"), dict) else {}
+    output_data = final_response.get("output") if isinstance(final_response.get("output"), dict) else {}
+    video_url = str(
+        content.get("video_url") or content.get("url") or metadata.get("url") or
+        output_data.get("video_url") or output_data.get("url") or final_response.get("url") or ""
+    )
     if protocol == "doubao_native" and video_url:
         request = urllib.request.Request(video_url, headers={"User-Agent": "YingliuDemo/3.0"})
     elif protocol == "doubao_native":
@@ -674,6 +752,11 @@ def wait_and_download_video(job_id: str, task_key: str, upstream_id: str, api_ke
         shutil.copyfileobj(response, handle, length=1024 * 1024)
     if output.stat().st_size < 1024:
         raise RuntimeError(f"上游任务 {task_key} 返回的成片无效")
+    try:
+        probe_duration(output, limit=None)
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+        output.unlink(missing_ok=True)
+        raise RuntimeError(f"上游任务 {task_key} 返回的内容不是有效视频") from exc
 
 
 def prompt_for_window(state: dict[str, Any], start: float, end: float) -> str:
@@ -742,44 +825,13 @@ def generate_upstream_job(job_id: str) -> None:
             requested_duration = round(duration)
             if requested_duration < spec["min_duration"] or requested_duration > spec["max_duration"]:
                 raise ValueError(f"{model} 官方时长范围是 {spec['min_duration']}–{spec['max_duration']} 秒，当前音频 {duration:.2f} 秒")
-            content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
             write_state(job_id, stage="正在创建 ModelsNexus 可拉取的短时素材链接", progress=16)
-            for key, filename in files.items():
-                if key == "lyrics":
-                    continue
-                path = directory / filename
-                if key == "reference" and path.suffix.lower() not in {".mp4", ".mov"}:
-                    raise ValueError("Seedance 参考视频仅支持 MP4/MOV")
-                if key in {"song", "voice"} and path.suffix.lower() not in {".mp3", ".wav"}:
-                    raise ValueError("Seedance 参考音频仅支持 MP3/WAV")
-                # ModelsNexus 直接拉取两小时有效的签名公网链接，避免大文件再次上传导致 413。
-                uri = create_signed_asset_url(job_id, key, path)
-                media_type = seedance_media_type(key)
-                if media_type == "image":
-                    content.append({
-                        "type": "image_url", "image_url": {"url": uri}, "role": "reference_image",
-                    })
-                elif media_type == "video":
-                    content.append({
-                        "type": "video_url", "video_url": {"url": uri}, "role": "reference_video",
-                    })
-                else:
-                    content.append({
-                        "type": "audio_url", "audio_url": {"url": uri}, "role": "reference_audio",
-                    })
-            payload = {
-                "model": model, "content": content, "duration": requested_duration,
-                "resolution": spec["resolution"], "ratio": ratio,
-                "generate_audio": True,
-                "omni_reference_task_type": "reference",
-            }
-            upstream_id = submit_video_task(
-                job_id, "seedance", payload, MODELSNEXUS_API_KEY, protocol="doubao_native",
-            )
+            content = build_models_nexus_content(job_id, directory, files, prompt)
+            payload = seedance_payload(model, spec, ratio, requested_duration, content)
+            upstream_id = submit_video_task(job_id, "seedance", payload, MODELSNEXUS_API_KEY)
             upstream_output = directory / "upstream.mp4"
             wait_and_download_video(
                 job_id, "seedance", upstream_id, MODELSNEXUS_API_KEY, upstream_output, 22, 70,
-                protocol="doubao_native",
             )
             # Seedance 保持模型原始输出，服务器不做 FFmpeg 二次渲染或换音轨。
             upstream_output.replace(output)
@@ -794,18 +846,13 @@ def generate_upstream_job(job_id: str) -> None:
             durations = [base + (1 if index < remainder else 0) for index in range(segment_count)]
             if any(value < spec["min_duration"] or value > spec["max_duration"] for value in durations):
                 raise ValueError(f"无法按 MiniMax 官方 {spec['min_duration']}–{spec['max_duration']} 秒范围拆分当前音频")
-            portraits = [(key, directory / filename) for key, filename in files.items() if key.startswith("portrait")][:4]
-            reference_images = [create_signed_asset_url(job_id, key, path) for key, path in portraits]
             clips: list[pathlib.Path] = []
             cursor = 0.0
             for index, segment_duration in enumerate(durations):
                 task_key = f"minimax-{index + 1:02d}"
-                payload = {
-                    "model": model,
-                    "prompt": prompt_for_window(state, cursor, min(duration, cursor + segment_duration)),
-                    "duration": segment_duration, "ratio": ratio, "resolution": spec["resolution"],
-                    "referenceImages": reference_images, "generate_audio": True, "watermark": False,
-                }
+                segment_prompt = prompt_for_window(state, cursor, min(duration, cursor + segment_duration))
+                content = build_models_nexus_content(job_id, directory, files, segment_prompt)
+                payload = minimax_payload(model, spec, ratio, segment_duration, content)
                 upstream_id = submit_video_task(job_id, task_key, payload, MINIMAX_API_KEY)
                 clip = directory / f"upstream-{index + 1:02d}.mp4"
                 wait_and_download_video(job_id, task_key, upstream_id, MINIMAX_API_KEY, clip,
@@ -964,6 +1011,30 @@ def normalize_audio_upload(directory: pathlib.Path, files: dict[str, str], key: 
     source.unlink(missing_ok=True)
     output.replace(final_output)
     files[key] = final_output.name
+
+
+def normalize_reference_video(directory: pathlib.Path, files: dict[str, str]) -> None:
+    """把任意 FFmpeg 可读对标视频统一为 ModelsNexus 稳定拉取的 MP4/H.264/AAC。"""
+    filename = files.get("reference")
+    if not filename:
+        return
+    source = directory / filename
+    output = directory / "reference-normalized.mp4"
+    try:
+        subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+            "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            "-movflags", "+faststart", str(output),
+        ], check=True, capture_output=True, timeout=1800)
+        probe_duration(output, limit=None)
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+        output.unlink(missing_ok=True)
+        raise ValueError("reference 无法转换为 ModelsNexus 支持的 MP4/H.264") from exc
+    source.unlink(missing_ok=True)
+    final_output = directory / "reference.mp4"
+    output.replace(final_output)
+    files["reference"] = final_output.name
 
 
 def classify_reference_upload(directory: pathlib.Path, files: dict[str, str]) -> None:
@@ -1237,6 +1308,7 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
             if key in form and getattr(form[key], "filename", None):
                 files[key] = save_upload(form[key], directory, key)
         classify_reference_upload(directory, files)
+        normalize_reference_video(directory, files)
         normalize_audio_upload(directory, files, "song")
         normalize_audio_upload(directory, files, "voice")
         normalize_audio_upload(directory, files, "reference_audio")
@@ -1326,6 +1398,71 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def serve_signed_asset(self, path: str, include_body: bool = True) -> bool:
+        """向上游提供带 Range/HEAD 的短时素材地址；返回是否命中素材路由。"""
+        if not path.startswith("/assets/"):
+            return False
+        try:
+            _, _, job_id, token = path.split("/", 3)
+            state = read_state(job_id)
+            signed_assets = state.get("signed_assets") if isinstance(state.get("signed_assets"), dict) else {}
+            item = signed_assets.get(token) if isinstance(signed_assets, dict) else None
+            if not isinstance(item, dict) or int(item.get("expires_at", 0)) < int(time.time()):
+                raise FileNotFoundError(token)
+            filename = pathlib.Path(str(item.get("filename", ""))).name
+            source = job_dir(job_id) / filename
+            if not source.is_file() or source.parent != job_dir(job_id):
+                raise FileNotFoundError(filename)
+            content_type = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
+            file_size = source.stat().st_size
+            range_header = self.headers.get("Range", "")
+            start, end = 0, file_size - 1
+            status = HTTPStatus.OK
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip()) if range_header else None
+            if match:
+                if match.group(1):
+                    start = int(match.group(1))
+                    end = min(file_size - 1, int(match.group(2))) if match.group(2) else file_size - 1
+                elif match.group(2):
+                    suffix_size = min(file_size, int(match.group(2)))
+                    start = file_size - suffix_size
+                if start < 0 or start > end or start >= file_size:
+                    self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                    self.send_header("Content-Range", f"bytes */{file_size}")
+                    self.end_headers()
+                    return True
+                status = HTTPStatus.PARTIAL_CONTENT
+            content_length = end - start + 1
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(content_length))
+            self.send_header("Accept-Ranges", "bytes")
+            if status == HTTPStatus.PARTIAL_CONTENT:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+            self.send_header("Cache-Control", "private, no-store, max-age=0")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            if include_body:
+                with source.open("rb") as handle:
+                    handle.seek(start)
+                    remaining = content_length
+                    while remaining > 0:
+                        chunk = handle.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+        except (ValueError, FileNotFoundError, IndexError):
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": "素材链接不存在或已过期"})
+        return True
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path.rstrip("/")
+        if self.serve_signed_asset(path, include_body=False):
+            return
+        self.send_response(HTTPStatus.NOT_FOUND)
+        self.end_headers()
+
     def do_GET(self) -> None:  # noqa: N802
         parsed_url = urlparse(self.path)
         path = parsed_url.path.rstrip("/")
@@ -1356,58 +1493,7 @@ class Handler(BaseHTTPRequestHandler):
             methods = DIRECTOR_METHODS.get(director, DIRECTOR_METHODS["王家卫"])
             self.send_json(HTTPStatus.OK, retrieve_film_corpus(director, methods, query))
             return
-        if path.startswith("/assets/"):
-            try:
-                _, _, job_id, token = path.split("/", 3)
-                state = read_state(job_id)
-                signed_assets = state.get("signed_assets") if isinstance(state.get("signed_assets"), dict) else {}
-                item = signed_assets.get(token) if isinstance(signed_assets, dict) else None
-                if not isinstance(item, dict) or int(item.get("expires_at", 0)) < int(time.time()):
-                    raise FileNotFoundError(token)
-                filename = pathlib.Path(str(item.get("filename", ""))).name
-                source = job_dir(job_id) / filename
-                if not source.is_file() or source.parent != job_dir(job_id):
-                    raise FileNotFoundError(filename)
-                content_type = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
-                file_size = source.stat().st_size
-                range_header = self.headers.get("Range", "")
-                start, end = 0, file_size - 1
-                status = HTTPStatus.OK
-                match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip()) if range_header else None
-                if match:
-                    if match.group(1):
-                        start = int(match.group(1))
-                        end = min(file_size - 1, int(match.group(2))) if match.group(2) else file_size - 1
-                    elif match.group(2):
-                        suffix_size = min(file_size, int(match.group(2)))
-                        start = file_size - suffix_size
-                    if start < 0 or start > end or start >= file_size:
-                        self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-                        self.send_header("Content-Range", f"bytes */{file_size}")
-                        self.end_headers()
-                        return
-                    status = HTTPStatus.PARTIAL_CONTENT
-                content_length = end - start + 1
-                self.send_response(status)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(content_length))
-                self.send_header("Accept-Ranges", "bytes")
-                if status == HTTPStatus.PARTIAL_CONTENT:
-                    self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
-                self.send_header("Cache-Control", "private, no-store, max-age=0")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.end_headers()
-                with source.open("rb") as handle:
-                    handle.seek(start)
-                    remaining = content_length
-                    while remaining > 0:
-                        chunk = handle.read(min(1024 * 1024, remaining))
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-                        remaining -= len(chunk)
-            except (ValueError, FileNotFoundError, IndexError):
-                self.send_json(HTTPStatus.NOT_FOUND, {"error": "素材链接不存在或已过期"})
+        if self.serve_signed_asset(path):
             return
         if path.startswith("/jobs/"):
             try:
@@ -1488,6 +1574,7 @@ class Handler(BaseHTTPRequestHandler):
                     if key in form and getattr(form[key], "filename", None):
                         files[key] = save_upload(form[key], directory, key)
                 classify_reference_upload(directory, files)
+                normalize_reference_video(directory, files)
                 normalize_audio_upload(directory, files, "song")
                 normalize_audio_upload(directory, files, "voice")
                 normalize_audio_upload(directory, files, "reference_audio")
