@@ -5,6 +5,9 @@ type WorkbenchProps = {
   agentBusy: boolean;
   assets: Array<{ name: string; ready: boolean; optional: boolean }>;
   children: ReactNode;
+  corpusCount: number;
+  corpusReady: boolean;
+  referenceBlueprintReady: boolean;
   director: string;
   directors: ReadonlyArray<ReadonlyArray<string>>;
   model: string;
@@ -25,14 +28,16 @@ type InspectorView = 'properties' | 'prompt' | 'agent';
 const promptChecks = [
   ['歌词时间窗', '每镜起止时间与歌词句对齐'],
   ['人物一致性', '全部参考图同级组成身份与多角度特征约束'],
+  ['对标画面骨架', '逐段锁定具体布局、人物位置、动作节拍、运镜与切镜'],
   ['场景、动作、景别', '环境、表演和镜头尺度完整'],
   ['摄影和运镜', '焦段、机位、光线与运动明确'],
   ['导演方法', 'ZY 导演方案写入每镜约束'],
   ['负面提示词', '字幕、水印、畸变和身份漂移已排除'],
   ['镜头衔接', '开场状态、结尾动作与前后镜关系均有说明'],
+  ['电影语料检索', '逐镜引用本次检索命中的可执行电影语言'],
 ] as const;
 
-export function VelornProductionWorkbench({ activeStep, agentBusy, assets, children, director, directors, model, onBack, onDirectorChange, onStepChange, projectName, ratio, requirements, resolution, shots, steps }: WorkbenchProps) {
+export function VelornProductionWorkbench({ activeStep, agentBusy, assets, children, corpusCount, corpusReady, referenceBlueprintReady, director, directors, model, onBack, onDirectorChange, onStepChange, projectName, ratio, requirements, resolution, shots, steps }: WorkbenchProps) {
   const [libraryView, setLibraryView] = useState<LibraryView>('assets');
   const [inspectorView, setInspectorView] = useState<InspectorView>('properties');
   const [agentPrompt, setAgentPrompt] = useState('检查当前阶段，并给出下一步可执行计划');
@@ -132,8 +137,8 @@ export function VelornProductionWorkbench({ activeStep, agentBusy, assets, child
           <div className="vl-inspector-heading"><div><small>PROMPT REVIEW GATE</small><h2>第二步 · 分镜提示词确认</h2></div><i className={approvedCount === promptChecks.length ? 'is-passed' : ''}>{approvedCount}/{promptChecks.length}</i></div>
           <p className="vl-review-intro">这里审核提示词本身，并确认模型与输出规格。完成后直接进入成片合成与交付。</p>
           <div className="vl-review-list">{promptChecks.map(([title, copy], index) => <button className={approvedChecks[index] ? 'is-approved' : ''} type="button" key={title} onClick={() => togglePromptCheck(index)}><span>{approvedChecks[index] ? '✓' : '!'}</span><div><b>{title}</b><small>{copy}</small></div><em>{approvedChecks[index] ? '已覆盖' : '待补充'}</em></button>)}</div>
-          <section className="vl-review-summary"><div><span>镜头提示词</span><b>{shots.length} 份</b></div><div><span>导演方法</span><b>{director}</b></div><div><span>审核门禁</span><b>{approvedCount === promptChecks.length ? '可以送审' : '尚未通过'}</b></div></section>
-          <button className="vl-review-action" type="button" disabled={approvedCount !== promptChecks.length || shots.length === 0} onClick={() => onStepChange(deliveryStep)}>确认提示词与生成方案，进入成片交付 <span>→</span></button>
+          <section className="vl-review-summary"><div><span>镜头提示词</span><b>{shots.length} 份</b></div><div><span>电影语料</span><b>{corpusReady ? `${corpusCount} 条命中` : '旧结果未检索'}</b></div><div><span>对标画面</span><b>{referenceReady ? referenceBlueprintReady ? '骨架已锁定' : '需要重分析' : '未提供'}</b></div><div><span>审核门禁</span><b>{approvedCount === promptChecks.length && corpusReady && referenceBlueprintReady ? '可以送审' : '尚未通过'}</b></div></section>
+          <button className="vl-review-action" type="button" disabled={approvedCount !== promptChecks.length || shots.length === 0 || !corpusReady || !referenceBlueprintReady} onClick={() => onStepChange(deliveryStep)}>确认提示词与生成方案，进入成片交付 <span>→</span></button>
         </div>}
 
         {inspectorView === 'agent' && <div className="vl-agent-panel">

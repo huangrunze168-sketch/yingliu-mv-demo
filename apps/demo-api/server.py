@@ -950,10 +950,10 @@ def image_data_url(path: pathlib.Path, output: pathlib.Path) -> str:
     return f"data:{mime};base64,{encoded}"
 
 
-def reference_frame_data_url(path: pathlib.Path, output: pathlib.Path) -> str:
+def reference_frame_data_url(path: pathlib.Path, output: pathlib.Path, timestamp: float) -> str:
     subprocess.run(
         [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", "1", "-i", str(path),
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{timestamp:.3f}", "-i", str(path),
             "-vf", "scale='min(1024,iw)':-2", "-frames:v", "1", "-q:v", "4", str(output),
         ],
         check=True,
@@ -964,28 +964,61 @@ def reference_frame_data_url(path: pathlib.Path, output: pathlib.Path) -> str:
     return f"data:image/jpeg;base64,{encoded}"
 
 
-def call_deepseek_agent(context: dict[str, Any], image_urls: list[str]) -> dict[str, Any]:
+def detect_reference_scene_cuts(path: pathlib.Path, duration: float) -> list[float]:
+    """用 FFmpeg 场景差异检测取得候选切点；失败时退回均匀采样。"""
+    try:
+        completed = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "info", "-i", str(path),
+                "-vf", "select='gt(scene,0.28)',showinfo", "-an", "-f", "null", "-",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        cuts = [float(value) for value in re.findall(r"pts_time:([0-9.]+)", completed.stderr)]
+    except (subprocess.SubprocessError, OSError, ValueError):
+        cuts = []
+    return sorted({round(value, 3) for value in cuts if 0.25 < value < duration - 0.25})[:40]
+
+
+def reference_sample_times(duration: float, cuts: list[float], limit: int = 10) -> list[float]:
+    boundaries = [0.0, *cuts, duration]
+    candidates = [max(0.0, min(duration - 0.05, (start + end) / 2)) for start, end in zip(boundaries, boundaries[1:])]
+    if len(candidates) < min(limit, 6):
+        candidates.extend(duration * ratio for ratio in (0.08, 0.22, 0.38, 0.55, 0.72, 0.9))
+    unique = sorted({round(value, 3) for value in candidates if 0 <= value < duration})
+    if len(unique) <= limit:
+        return unique
+    indexes = [round(index * (len(unique) - 1) / (limit - 1)) for index in range(limit)]
+    return [unique[index] for index in indexes]
+
+
+def call_deepseek_agent(context: dict[str, Any], image_inputs: list[dict[str, str]]) -> dict[str, Any]:
     if not DEEPSEEK_API_KEY:
         raise RuntimeError("DeepSeek Agent 未配置")
-    system_prompt = """你是专业音乐 MV 制作 Agent。你必须真正分析用户需求、歌词、音频时长、全部同级人物参考图、可选参考片画面，并严格执行随请求提供的结构化导演方法库。导演姓名只是方法库索引，绝不能用“某某风格”“采用某导演方法”或在提示词里附加导演姓名来代替执行。你必须把方法库逐项转译成可拍摄、可生成的构图、焦段、机位、运镜、光线、色彩、人物调度和节奏指令。不要声称看到了未提供的内容，不要复制任何具体作品、角色或标志性场面，不要输出分析过程。只输出合法 JSON，结构严格为：
+    system_prompt = """你是专业音乐 MV 制作 Agent。你必须真正分析用户需求、歌词、音频时长、全部同级人物参考图、可选对标视频画面，并严格执行随请求提供的结构化导演方法库。若提供对标视频，它是本次生成的权威画面骨架：按时间顺序拆解并尽量复刻每段的具体画面布局、主体数量与位置、前中后景关系、动作顺序和节拍、景别、机位、镜头运动方向以及切镜时间；只按照用户上传物料替换人物身份、服装、场景语义、文字和品牌元素。导演库与电影语料是第二层修辞增强，只用于把这个画面骨架润色为可执行的光线、色彩、质感、摄影和叙事表达，不得擅自改掉对标画面的关键几何关系、动作节奏和镜头时序。导演姓名只是方法库索引，绝不能用“某某风格”“采用某导演方法”或在提示词里附加导演姓名来代替执行。不要声称看到了未提供的内容，不要输出分析过程。只输出合法 JSON，结构严格为：
 {
   "project_summary": "一句话项目判断",
   "creative_brief": "完整创作策略",
   "analysis_cards": [{"title":"需求理解","value":"短结论","copy":"具体依据"}],
   "timeline": [{"time":"00:00","label":"段落或情绪"}],
   "material_observations": ["从参考物料得到的具体观察"],
+  "reference_breakdown": {"summary":"对标视频画面骨架概述，无参考视频时写未提供","shot_scale_pattern":"景别变化规律","composition":"构图与空间规律","lighting_color":"光线与色彩规律","blocking_performance":"人物调度与表演规律","editing_rhythm":"切镜密度、节奏与关键切点","reference_shots":[{"source_time":"00:00.000–00:03.000","visual_blueprint":"该段具体可见画面","subject_layout":"主体数量、位置、朝向、前中后景与相互关系","action_timing":"逐拍动作顺序与发生时点","shot_size_camera":"景别、焦段感、机位、视角与运镜方向","lighting_color":"具体光源、明暗和色彩","transition":"入镜、出镜与切换方式","target_mapping":"保留画面骨架，并用本项目人物与场景替换的方式"}],"rhetorical_enhancement":["导演库与电影语料对光色、质感、摄影和叙事的增强"]},
   "director_application": "如何将检索命中的电影语料转译为本项目的摄影、构图、光线和调度",
   "shots": [{
     "id":"SH01","time":"00:00–00:06","title":"镜头标题",
     "lyrics_window":"00:00.000–00:06.000 · 对应歌词原文",
     "lyrics_sync":{"start":"00:00.000","end":"00:06.000","text":"该时间段歌词原文或纯音乐","section":"主歌/副歌/间奏等","cut_on":"具体节拍、字词或动作切点"},
     "corpus_refs":["本镜实际使用的语料 ID，至少 3 项"],
+    "reference_match":{"source_time":"对应对标视频时间段","visual_blueprint":"必须复刻的具体画面","subject_layout":"主体数量、位置、朝向和空间关系","action_timing":"动作顺序与节拍","camera_motion":"景别、机位与运镜方向","transition":"切镜与衔接方式"},
     "director_method":{"composition":"本镜构图落地","camera":"焦段、机位和运镜落地","lighting_color":"光线和色彩落地","blocking":"人物调度落地","rhythm":"节奏与切点落地"},
-    "prompt":"必须以【时间轴 00:00.000–00:06.000｜歌词：该时间段歌词原文】开头，再写已完全展开的画面和导演方法；不得出现导演姓名或某某风格字样",
+    "prompt":"必须以【时间轴 00:00.000–00:06.000｜歌词：该时间段歌词原文】开头；提供对标视频时紧接【对标画面 00:00.000–00:03.000】并完整写出要复刻的画面布局、人物位置、动作节拍、景别、机位、运镜和切镜，再写导演库与电影语料润色后的光色、质感和叙事表达；不得出现导演姓名、某某风格字样或电影语料内部编号",
     "negative_prompt":"字幕、水印、畸形肢体、面部漂移等具体负面约束"
   }]
 }
-analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物参考图、参考片与镜头策略。shots 数量必须根据本次真实音频时长、歌词结构和节奏动态决定，每镜通常 4–8 秒并覆盖完整音频，不得固定为 6 项。必须严格依据输入的结构化歌词时间轴划分镜头，不得改写、遗漏或编造歌词；跨越多句歌词的镜头要把该时间窗内所有歌词写入 lyrics_sync.text 和 prompt。纯音乐段必须明确写“纯音乐”。每条 prompt 必须独立完整，不得写“同上”。每个 director_method 的五项都必须是针对该镜头的具体执行方案，不能复述语料原文。每镜的 corpus_refs 必须从检索结果的 id 中选择，至少引用 3 项，且引用必须与本镜实际执行内容一致；corpus_refs 只允许出现在 JSON 元数据字段，prompt 和 negative_prompt 正文严禁出现任何语料 ID。参考图没有主次之分。"""
+analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物参考图、对标视频与镜头策略。提供对标视频时，必须结合全部抽帧时间和 FFmpeg 切点生成逐段 reference_shots，不能只概括风格或只描述第一帧；每个生成镜头都必须用 reference_match 指向具体对标时间段，并把画面布局、人物位置、动作节拍、景别、机位、运镜与切镜写进 prompt。对标视频优先决定“画面怎么摆、人物怎么动、镜头怎么走、何时切”，导演库和电影语料在不改变这些关键约束的前提下负责修辞与质感增强。shots 数量必须根据本次真实音频时长、歌词结构、对标视频切点和节奏动态决定并覆盖完整音频，不得固定为 6 项。必须严格依据输入的结构化歌词时间轴划分镜头，不得改写、遗漏或编造歌词；跨越多句歌词的镜头要把该时间窗内所有歌词写入 lyrics_sync.text 和 prompt。纯音乐段必须明确写“纯音乐”。每条 prompt 必须独立完整，不得写“同上”。每个 director_method 的五项都必须是针对该镜头的具体执行方案，不能复述语料原文。每镜的 corpus_refs 必须从检索结果的 id 中选择，至少引用 3 项，且引用必须与本镜实际执行内容一致；corpus_refs 只允许出现在 JSON 元数据字段，prompt 和 negative_prompt 正文严禁出现任何语料 ID。参考图没有主次之分。"""
     user_text = (
         "请根据以下真实项目上下文输出 JSON：\n"
         f"项目名称：{context['title']}\n"
@@ -1000,12 +1033,14 @@ analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物�
         f"音频时长：{context['duration']:.2f} 秒\n"
         f"人物参考图数量：{context['portrait_count']}，全部同级\n"
         f"参考视频：{'已提供，附带抽帧' if context['has_reference'] else '未提供'}\n"
+        f"对标视频技术拆解上下文：{json.dumps(context['reference_video'], ensure_ascii=False)}\n"
         f"结构化歌词时间轴（镜头必须与此对齐）：{json.dumps(context['lyric_timeline'], ensure_ascii=False)}\n"
         f"歌词原文：\n{context['lyrics']}"
     )
     user_content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
-    for image_url in image_urls:
-        user_content.append({"type": "image_url", "image_url": {"url": image_url, "detail": "low"}})
+    for image_input in image_inputs:
+        user_content.append({"type": "text", "text": image_input["label"]})
+        user_content.append({"type": "image_url", "image_url": {"url": image_input["url"], "detail": "low"}})
     payload = json.dumps({
         "model": DEEPSEEK_MODEL,
         "messages": [
@@ -1043,6 +1078,15 @@ analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物�
         raise RuntimeError("DeepSeek 返回结构不完整，请重试")
     required_method_fields = {"composition", "camera", "lighting_color", "blocking", "rhythm"}
     corpus_ids = {str(item.get("id")) for item in context["corpus_retrieval"]["items"]}
+    if context["has_reference"]:
+        breakdown = result.get("reference_breakdown")
+        required_breakdown_fields = {"summary", "shot_scale_pattern", "composition", "lighting_color", "blocking_performance", "editing_rhythm", "reference_shots", "rhetorical_enhancement"}
+        if not isinstance(breakdown, dict) or not required_breakdown_fields.issubset(breakdown):
+            raise RuntimeError("Agent 未完整拆解对标视频，请重新分析")
+        reference_shots = breakdown.get("reference_shots")
+        required_reference_shot_fields = {"source_time", "visual_blueprint", "subject_layout", "action_timing", "shot_size_camera", "lighting_color", "transition", "target_mapping"}
+        if not isinstance(reference_shots, list) or not reference_shots or any(not isinstance(item, dict) or not required_reference_shot_fields.issubset(item) or any(not str(item[key]).strip() for key in required_reference_shot_fields) for item in reference_shots):
+            raise RuntimeError("Agent 未逐段输出对标视频画面骨架，请重新分析")
     for shot in shots:
         method = shot.get("director_method") if isinstance(shot, dict) else None
         if not isinstance(method, dict) or not required_method_fields.issubset(method) or any(not str(method[key]).strip() for key in required_method_fields):
@@ -1059,6 +1103,13 @@ analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物�
             raise RuntimeError("分镜未引用有效的电影语料检索结果，请重新分析")
         if any(corpus_id in prompt or corpus_id in str(shot.get("negative_prompt", "")) for corpus_id in corpus_ids):
             raise RuntimeError("分镜提示词正文不得出现电影语料内部编号，请重新分析")
+        if context["has_reference"]:
+            reference_match = shot.get("reference_match") if isinstance(shot, dict) else None
+            required_match_fields = {"source_time", "visual_blueprint", "subject_layout", "action_timing", "camera_motion", "transition"}
+            if not isinstance(reference_match, dict) or not required_match_fields.issubset(reference_match) or any(not str(reference_match[key]).strip() for key in required_match_fields):
+                raise RuntimeError("分镜未写明对标视频画面复刻约束，请重新分析")
+            if str(reference_match["source_time"]).strip() not in prompt:
+                raise RuntimeError("分镜提示词未写入对应的对标视频时间段，请重新分析")
     result["corpus_retrieval"] = context["corpus_retrieval"]
     result["provider"] = "DeepSeek"
     result["model"] = api_payload.get("model", DEEPSEEK_MODEL)
@@ -1079,15 +1130,35 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
             if key in form and getattr(form[key], "filename", None):
                 files[key] = save_upload(form[key], directory, key)
         duration = probe_duration(directory / files["song"], limit=None)
-        image_urls: list[str] = []
+        image_inputs: list[dict[str, str]] = []
         portrait_keys = [key for key in ALLOWED_EXTENSIONS if key.startswith("portrait") and key in files]
         for index, key in enumerate(portrait_keys):
-            image_urls.append(image_data_url(directory / files[key], directory / f"agent-portrait-{index + 1}.jpg"))
+            image_inputs.append({
+                "label": f"人物参考图 {index + 1}/{len(portrait_keys)}（全部参考图同级）",
+                "url": image_data_url(directory / files[key], directory / f"agent-portrait-{index + 1}.jpg"),
+            })
+        reference_video: dict[str, Any] = {"provided": False}
         if "reference" in files:
             try:
-                image_urls.append(reference_frame_data_url(directory / files["reference"], directory / "agent-reference-frame.jpg"))
-            except (subprocess.SubprocessError, OSError):
-                pass
+                reference_path = directory / files["reference"]
+                reference_duration = probe_duration(reference_path, limit=None)
+                scene_cuts = detect_reference_scene_cuts(reference_path, reference_duration)
+                sample_times = reference_sample_times(reference_duration, scene_cuts)
+                reference_video = {
+                    "provided": True,
+                    "duration_seconds": round(reference_duration, 3),
+                    "scene_cut_times": [format_timestamp(value) for value in scene_cuts],
+                    "estimated_shots": len(scene_cuts) + 1,
+                    "sample_times": [format_timestamp(value) for value in sample_times],
+                    "instruction": "把对标视频作为权威画面骨架，按时间顺序比较全部抽帧与切点；逐段记录具体画面、主体数量和位置、前中后景、动作节拍、景别、机位、运镜方向与切镜。生成方案尽量复刻这些结构，只替换用户人物、服装、场景语义、文字和品牌元素；导演库与电影语料仅负责修辞增强。",
+                }
+                for index, timestamp in enumerate(sample_times):
+                    image_inputs.append({
+                        "label": f"对标视频抽帧 {index + 1}/{len(sample_times)}，时间点 {format_timestamp(timestamp)}",
+                        "url": reference_frame_data_url(reference_path, directory / f"agent-reference-{index + 1}.jpg", timestamp),
+                    })
+            except (subprocess.SubprocessError, OSError, ValueError) as exc:
+                raise RuntimeError(f"对标视频拆解失败：{exc}") from exc
         director = str(form.getfirst("director", "王家卫"))[:60]
         lyrics = read_lyrics(directory / files["lyrics"])
         corpus_query = "\n".join([
@@ -1109,10 +1180,11 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
             "duration": duration,
             "portrait_count": len(portrait_keys),
             "has_reference": "reference" in files,
+            "reference_video": reference_video,
             "lyrics": lyrics,
             "lyric_timeline": build_lyric_timeline(lyrics, duration),
         }
-        return call_deepseek_agent(context, image_urls)
+        return call_deepseek_agent(context, image_inputs)
     finally:
         shutil.rmtree(directory, ignore_errors=True)
 
