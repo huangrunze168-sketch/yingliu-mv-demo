@@ -1893,3 +1893,42 @@
 /* 三步 Agent 主流程：项目输入 → 分析并确认生成 → 成片交付 */
 .vl-guided-steps { grid-template-columns:repeat(4,minmax(112px,1fr)); }
 @media (max-width:820px) { .vl-guided-steps { grid-template-columns:repeat(4,132px); } }
+
+/* 分镜审阅采用双列大卡片，保证提示词与复刻约束可读 */
+.vl-stage-scroll > .storyboard-shell { width:min(100%,1680px); }
+.vl-stage-scroll .mv-shot-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; }
+.vl-stage-scroll .mv-shot-grid .shot-media { min-height:190px; }
+.vl-stage-scroll .mv-shot-grid .shot-card-copy { padding:18px; }
+.vl-stage-scroll .mv-shot-grid .shot-card-copy h3 { margin-top:12px; font-size:17px; }
+.vl-stage-scroll .mv-shot-grid .shot-card-copy > p { min-height:0; font-size:12px; line-height:1.8; }
+.vl-stage-scroll .mv-shot-grid .shot-card-title > span,
+.vl-stage-scroll .mv-shot-grid .shot-card-title i { font-size:10px; }
+.vl-stage-scroll .mv-shot-grid .mv-lyrics-sync { padding:13px; }
+.vl-stage-scroll .mv-shot-grid .mv-lyrics-sync header b { font-size:10px; }
+.vl-stage-scroll .mv-shot-grid .mv-lyrics-sync header span { font-size:9px; }
+.vl-stage-scroll .mv-shot-grid .mv-lyrics-sync p { font-size:12px!important; }
+.vl-stage-scroll .mv-shot-grid .mv-lyrics-sync small,
+.vl-stage-scroll .mv-shot-grid .mv-reference-match small { font-size:10px; line-height:1.65; }
+.vl-stage-scroll .mv-shot-grid .mv-reference-match { padding:13px; }
+.vl-stage-scroll .mv-shot-grid .mv-reference-match header b,
+.vl-stage-scroll .mv-shot-grid .mv-shot-method header b,
+.vl-stage-scroll .mv-shot-grid .mv-corpus-evidence header b { font-size:10px; }
+.vl-stage-scroll .mv-shot-grid .mv-reference-match header span,
+.vl-stage-scroll .mv-shot-grid .mv-shot-method header span,
+.vl-stage-scroll .mv-shot-grid .mv-corpus-evidence header span { font-size:9px; }
+.vl-stage-scroll .mv-shot-grid .mv-reference-match p { font-size:11px!important; line-height:1.7!important; }
+.vl-stage-scroll .mv-shot-grid .mv-shot-method dl > div { grid-template-columns:44px minmax(0,1fr); padding:8px 0; }
+.vl-stage-scroll .mv-shot-grid .mv-shot-method dt { font-size:9px; }
+.vl-stage-scroll .mv-shot-grid .mv-shot-method dd { font-size:10px; line-height:1.65; }
+.vl-stage-scroll .mv-shot-grid .mv-corpus-evidence > div span { font-size:9px; }
+.vl-stage-scroll .mv-shot-grid .mv-negative-prompt { font-size:10px!important; line-height:1.7!important; }
+.vl-stage-scroll .mv-shot-grid .mv-shot-tags span { padding:6px 9px; font-size:10px; }
+
+.mv-reference-missing-warning { display:flex; align-items:center; justify-content:space-between; gap:18px; margin:14px 0; padding:16px 18px; border:1px solid rgba(241,105,115,.52); border-radius:10px; background:rgba(241,105,115,.07); }
+.mv-reference-missing-warning b { color:#ffd7da; font-size:13px; }
+.mv-reference-missing-warning p { margin:7px 0 0; color:#bfa4a7; font-size:11px; line-height:1.65; }
+.mv-reference-missing-warning button { flex:0 0 auto; min-height:36px; padding:0 14px; border:1px solid rgba(241,105,115,.45); border-radius:6px; color:#ffd7da; background:rgba(241,105,115,.11); cursor:pointer; }
+
+@media (max-width:1180px) {
+  .vl-stage-scroll .mv-shot-grid { grid-template-columns:1fr; }
+}

@@ -1176,6 +1176,13 @@ analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物�
             if str(reference_match["source_time"]).strip() not in prompt:
                 raise RuntimeError("分镜提示词未写入对应的对标视频时间段，请重新分析")
     result["corpus_retrieval"] = context["corpus_retrieval"]
+    result["material_manifest"] = {
+        "song": context["has_song"],
+        "lyrics": context["has_lyrics"],
+        "portrait_count": context["portrait_count"],
+        "reference_video": context["has_reference"],
+        "reference_audio": context["has_reference_audio"],
+    }
     result["provider"] = "DeepSeek"
     result["model"] = api_payload.get("model", DEEPSEEK_MODEL)
     result["usage"] = api_payload.get("usage", {})

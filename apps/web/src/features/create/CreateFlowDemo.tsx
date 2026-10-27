@@ -59,6 +59,13 @@ type AgentAnalysis = {
   analysis_cards: Array<{ title: string; value: string; copy: string }>;
   timeline: Array<{ time: string; label: string }>;
   material_observations: string[];
+  material_manifest?: {
+    song: boolean;
+    lyrics: boolean;
+    portrait_count: number;
+    reference_video: boolean;
+    reference_audio: boolean;
+  };
   director_application: string;
   reference_breakdown?: {
     summary: string;
@@ -121,8 +128,8 @@ const assetConfig: Array<{ key: AssetKey; title: string; copy: string; accept: s
   { key: 'song', title: '原始音频', copy: '可选；上传后作为整支 MV 的时间基准', accept: 'audio/*', required: false, tag: 'MP3 · WAV · FLAC' },
   { key: 'lyrics', title: '歌词文件', copy: '可选；上传后用于逐句对齐、口型与切点', accept: '.txt,.lrc,text/plain', required: false, tag: 'TXT · LRC' },
   { key: 'portrait', title: '人物参考图', copy: '可选；支持多张，用于补充正脸、侧脸、全身和服装', accept: 'image/*', required: false, tag: '最多 8 张' },
-  { key: 'reference', title: '参考视频 / 音频', copy: '可选；系统按真实媒体流识别，视频用于拆镜，音频自动转 WAV', accept: 'video/*,audio/*', required: false, tag: '视频 · 音频' },
-  { key: 'voice', title: '参考音色', copy: '可选，用于生成新演唱音轨', accept: 'audio/*', required: false, tag: 'MP3 · WAV' },
+  { key: 'reference', title: '对标视频', copy: '可选；作为具体画面、动作、运镜和切镜的复刻骨架', accept: 'video/*,.mp4,.mov,.webm,.mkv', required: false, tag: 'MP4 · MOV · WEBM' },
+  { key: 'voice', title: '参考音频', copy: '可选；任意 FFmpeg 可读音频都会自动标准化为 WAV', accept: 'audio/*', required: false, tag: '自动转 WAV' },
 ];
 
 const stepCopy = [
@@ -239,8 +246,7 @@ export function CreateFlowDemo() {
     () => assetConfig.filter(item => item.required).every(item => item.key === 'portrait' ? assets.portrait.length > 0 : Boolean(assets[item.key])),
     [assets],
   );
-  const referenceIsAudio = Boolean(assets.reference && (assets.reference.type.startsWith('audio/') || /\.(mp3|wav|flac|m4a|aac|ogg|opus|ape|wma|aiff?|caf)$/i.test(assets.reference.name)));
-  const referenceIsVideo = Boolean(assets.reference && !referenceIsAudio);
+  const referenceIsVideo = Boolean(assets.reference);
 
   const visibleProjects = useMemo(() => {
     const keyword = projectSearch.trim().toLocaleLowerCase('zh-CN');
@@ -507,7 +513,7 @@ export function CreateFlowDemo() {
       setNotice('当前是语料检索上线前生成的旧分镜，请返回第一步重新执行 Agent 分析。');
       return;
     }
-    if (activeStep === 1 && referenceIsVideo && !agentAnalysis?.reference_breakdown?.reference_shots?.length) {
+    if (activeStep === 1 && referenceIsVideo && !analysisHasReferenceVideo) {
       setNotice('当前分镜没有逐段复刻对标视频的画面骨架，请返回第一步重新执行 Agent 分析。');
       return;
     }
@@ -595,7 +601,8 @@ export function CreateFlowDemo() {
   const corpusItems = agentAnalysis?.corpus_retrieval?.items ?? [];
   const corpusById = useMemo(() => new Map(corpusItems.map(item => [item.id, item])), [corpusItems]);
   const corpusReady = corpusItems.length > 0;
-  const referenceBlueprintReady = !referenceIsVideo || Boolean(agentAnalysis?.reference_breakdown?.reference_shots?.length);
+  const analysisHasReferenceVideo = Boolean(agentAnalysis?.material_manifest?.reference_video || agentAnalysis?.reference_breakdown?.reference_shots?.length);
+  const referenceBlueprintReady = !referenceIsVideo || analysisHasReferenceVideo;
 
   if (pageView === 'projects') {
     return (
@@ -759,7 +766,7 @@ export function CreateFlowDemo() {
           <section className="mv-agent-running" aria-live="polite">
             <header><div><span>✦</span><div><p className="overline">DEEPSEEK PRODUCTION AGENT</p><h2>{agentAnalyzing ? 'Agent 正在真实分析项目' : 'Agent 调用未完成'}</h2></div></div><strong>{agentAnalyzing ? 'API 处理中' : '需要重试'}</strong></header>
             <div className={`mv-agent-running-bar ${agentAnalyzing ? 'is-indeterminate' : 'is-error'}`}><span /></div>
-            <p>{agentAnalyzing ? `素材已提交后端。DeepSeek 正在读取真实歌词、音频时长、${assets.portrait.length} 张同级参考图${referenceIsVideo ? '及参考片抽帧' : referenceIsAudio ? '及自动标准化的参考音频' : ''}，并应用 ${director} 导演方法。` : agentAnalysisError}</p>
+            <p>{agentAnalyzing ? `素材已提交后端。DeepSeek 正在读取真实歌词、音频时长、${assets.portrait.length} 张同级参考图${referenceIsVideo ? '及对标视频逐段抽帧' : ''}${assets.voice ? '及自动标准化的参考音频' : ''}，并应用 ${director} 导演方法。` : agentAnalysisError}</p>
             <div className="mv-agent-running-steps">{agentAnalysisStages.map(([title, copy], index) => <article className={agentAnalyzing ? index === 0 ? 'is-done' : 'is-active' : index === 0 ? 'is-done' : ''} key={title}><span>{index === 0 ? '✓' : `0${index + 1}`}</span><div><b>{title}</b><small>{copy}</small></div><em>{index === 0 ? '已提交' : agentAnalyzing ? 'DeepSeek 处理中' : '未完成'}</em></article>)}</div>
             <footer>{agentAnalyzing ? <><span className="mv-agent-pulse" /> 正在等待 DeepSeek 返回结构化分析和逐镜提示词</> : <button className="button button-primary" type="button" onClick={() => void runAgentAnalysis()}>重新调用 Agent</button>}</footer>
           </section>
@@ -779,14 +786,15 @@ export function CreateFlowDemo() {
           <div className="storyboard-shell">
             <div className="storyboard-toolbar"><div><p className="overline">AGENT MASTER PROMPTS · {director}</p><h2>Agent 全能提示词输出</h2><small>{agentAnalysis?.creative_brief}</small></div><span className="mv-gate-pass">{displayedShots.length} 份真实提示词待确认</span></div>
             <section className="mv-master-prompt-source"><div><small>AGENT INPUT</small><b>用户需求 + 歌曲/歌词 + 人物参考图组 + 可选参考片 + 电影语料检索结果</b></div><span>→</span><div><small>AGENT OUTPUT</small><b>统一角色设定 + 逐镜画面 + 摄影运镜 + 镜头衔接 + 负面约束</b></div></section>
+            {referenceIsVideo && !analysisHasReferenceVideo ? <section className="mv-reference-missing-warning"><div><b>本次 Agent 结果没有读取到对标视频</b><p>不能把这批分镜当作“完美复刻”结果继续生成。请返回第一步重新选择真实视频文件，再执行 Agent 分析；参考音频请放到独立的“参考音频”卡片。</p></div><button type="button" onClick={() => { setActiveStep(0); setNotice('请在“对标视频”卡片重新选择视频文件，然后再次运行 Agent。'); }}>返回重新上传</button></section> : null}
             {corpusReady ? <>
               <section className="mv-director-proof"><div><small>FILM CORPUS RETRIEVAL</small><h3>{director} · 电影语料已检索并参与推理</h3></div><p>{agentAnalysis?.director_application}</p><span>{corpusItems.length} 条命中 · {agentAnalysis?.corpus_retrieval?.coverage.length || 0} 类覆盖</span></section>
               <section className="mv-corpus-results"><header><div><small>RETRIEVAL EVIDENCE</small><h3>本次电影语料检索命中</h3></div><span>{agentAnalysis?.corpus_retrieval?.version}</span></header><div>{corpusItems.map(item => <article key={item.id}><div><b>{item.title}</b><em>{item.category}</em></div><p>{item.text}</p></article>)}</div></section>
-              {agentAnalysis?.reference_breakdown?.reference_shots?.length && assets.reference ? <section className="mv-reference-breakdown"><header><div><small>BENCHMARK VIDEO BLUEPRINT</small><h3>对标视频画面骨架</h3></div><span>具体画面优先 · 导演语料修辞</span></header><p>{agentAnalysis.reference_breakdown.summary}</p><dl><div><dt>景别规律</dt><dd>{agentAnalysis.reference_breakdown.shot_scale_pattern}</dd></div><div><dt>构图空间</dt><dd>{agentAnalysis.reference_breakdown.composition}</dd></div><div><dt>光线色彩</dt><dd>{agentAnalysis.reference_breakdown.lighting_color}</dd></div><div><dt>人物调度</dt><dd>{agentAnalysis.reference_breakdown.blocking_performance}</dd></div><div><dt>剪辑节奏</dt><dd>{agentAnalysis.reference_breakdown.editing_rhythm}</dd></div></dl><div className="mv-reference-shot-list">{agentAnalysis.reference_breakdown.reference_shots.map((item, index) => <article key={`${item.source_time}-${index}`}><header><b>{item.source_time}</b><span>画面 {index + 1}</span></header><p>{item.visual_blueprint}</p><small><b>主体布局：</b>{item.subject_layout}</small><small><b>动作节拍：</b>{item.action_timing}</small><small><b>镜头：</b>{item.shot_size_camera}</small><small><b>切换：</b>{item.transition}</small><small><b>项目映射：</b>{item.target_mapping}</small></article>)}</div><div className="mv-reference-methods"><div><b>导演库与电影语料修辞</b>{agentAnalysis.reference_breakdown.rhetorical_enhancement.map(item => <span key={item}>{item}</span>)}</div></div></section> : null}
+              {agentAnalysis?.reference_breakdown?.reference_shots?.length && analysisHasReferenceVideo ? <section className="mv-reference-breakdown"><header><div><small>BENCHMARK VIDEO BLUEPRINT</small><h3>对标视频画面骨架</h3></div><span>具体画面优先 · 导演语料修辞</span></header><p>{agentAnalysis.reference_breakdown.summary}</p><dl><div><dt>景别规律</dt><dd>{agentAnalysis.reference_breakdown.shot_scale_pattern}</dd></div><div><dt>构图空间</dt><dd>{agentAnalysis.reference_breakdown.composition}</dd></div><div><dt>光线色彩</dt><dd>{agentAnalysis.reference_breakdown.lighting_color}</dd></div><div><dt>人物调度</dt><dd>{agentAnalysis.reference_breakdown.blocking_performance}</dd></div><div><dt>剪辑节奏</dt><dd>{agentAnalysis.reference_breakdown.editing_rhythm}</dd></div></dl><div className="mv-reference-shot-list">{agentAnalysis.reference_breakdown.reference_shots.map((item, index) => <article key={`${item.source_time}-${index}`}><header><b>{item.source_time}</b><span>画面 {index + 1}</span></header><p>{item.visual_blueprint}</p><small><b>主体布局：</b>{item.subject_layout}</small><small><b>动作节拍：</b>{item.action_timing}</small><small><b>镜头：</b>{item.shot_size_camera}</small><small><b>切换：</b>{item.transition}</small><small><b>项目映射：</b>{item.target_mapping}</small></article>)}</div><div className="mv-reference-methods"><div><b>导演库与电影语料修辞</b>{agentAnalysis.reference_breakdown.rhetorical_enhancement.map(item => <span key={item}>{item}</span>)}</div></div></section> : null}
             </> : <section className="mv-corpus-missing"><div><b>这批分镜没有电影语料检索记录</b><p>它是在语料库上线前生成的历史结果，不能作为已检索结果继续送审。</p></div><button type="button" onClick={() => { setActiveStep(0); setNotice('请重新选择本地素材并执行 Agent 分析，新分镜会显示真实语料命中。'); }}>返回第一步重新分析</button></section>}
             <div className="mv-prompt-gate-banner"><div><span>✓</span><p><b>八项提示词门禁</b><small>歌词时间窗 · 人物一致性 · 对标画面骨架 · 场景动作景别 · 摄影运镜 · 导演与语料修辞 · 负面提示词 · 镜头衔接</small></p></div><em>本步骤只出提示词，不生成图片</em></div>
             <div className="storyboard-grid mv-shot-grid">
-              {displayedShots.map((shot, index) => <article className="shot-card" key={shot.id}><div className={`shot-media mv-shot-${(index % 6) + 1}`}><span>{shot.id}</span><b>{shot.time}</b></div><div className="shot-card-copy"><div className="shot-card-title"><span>{String(index + 1).padStart(2, '0')}</span><i>DeepSeek 真实输出</i></div><h3>{shot.title}</h3>{shot.lyrics_sync ? <section className="mv-lyrics-sync"><header><b>{shot.lyrics_sync.start}–{shot.lyrics_sync.end}</b><span>{shot.lyrics_sync.section}</span></header><p>{shot.lyrics_sync.text}</p><small>切点：{shot.lyrics_sync.cut_on}</small></section> : shot.lyrics_window && <small className="mv-shot-lyrics">歌词时间窗：{shot.lyrics_window}</small>}<p>{shot.prompt}</p>{shot.reference_match && assets.reference ? <section className="mv-reference-match"><header><b>对标画面复刻约束</b><span>{shot.reference_match.source_time}</span></header><p>{shot.reference_match.visual_blueprint}</p><small><b>主体布局：</b>{shot.reference_match.subject_layout}</small><small><b>动作节拍：</b>{shot.reference_match.action_timing}</small><small><b>摄影运镜：</b>{shot.reference_match.camera_motion}</small><small><b>切镜衔接：</b>{shot.reference_match.transition}</small></section> : null}{shot.director_method && <section className="mv-shot-method"><header><b>导演方法实际执行</b><span>5 / 5</span></header><dl><div><dt>构图</dt><dd>{shot.director_method.composition}</dd></div><div><dt>摄影</dt><dd>{shot.director_method.camera}</dd></div><div><dt>光色</dt><dd>{shot.director_method.lighting_color}</dd></div><div><dt>调度</dt><dd>{shot.director_method.blocking}</dd></div><div><dt>节奏</dt><dd>{shot.director_method.rhythm}</dd></div></dl></section>}{shot.corpus_refs?.length ? <section className="mv-corpus-evidence"><header><b>电影语料引用</b><span>{shot.corpus_refs.length} 条</span></header><div>{shot.corpus_refs.map(reference => { const item = corpusById.get(reference); return <span title={item?.text} key={reference}>{item?.title || reference}</span>; })}</div></section> : null}{shot.negative_prompt && <p className="mv-negative-prompt"><b>负面提示词：</b>{shot.negative_prompt}</p>}<div className="mv-shot-tags"><span>{ratio}</span><span>{resolution}</span><span>{model}</span><span>歌词时间轴已锁定</span><span>电影语料已引用</span><span>{assets.reference ? '对标画面骨架已锁定' : '无对标视频'}</span><span>镜头衔接已写入</span><span>负面词已写入</span></div></div></article>)}
+              {displayedShots.map((shot, index) => <article className="shot-card" key={shot.id}><div className={`shot-media mv-shot-${(index % 6) + 1}`}><span>{shot.id}</span><b>{shot.time}</b></div><div className="shot-card-copy"><div className="shot-card-title"><span>{String(index + 1).padStart(2, '0')}</span><i>DeepSeek 真实输出</i></div><h3>{shot.title}</h3>{shot.lyrics_sync ? <section className="mv-lyrics-sync"><header><b>{shot.lyrics_sync.start}–{shot.lyrics_sync.end}</b><span>{shot.lyrics_sync.section}</span></header><p>{shot.lyrics_sync.text}</p><small>切点：{shot.lyrics_sync.cut_on}</small></section> : shot.lyrics_window && <small className="mv-shot-lyrics">歌词时间窗：{shot.lyrics_window}</small>}<p>{shot.prompt}</p>{shot.reference_match && analysisHasReferenceVideo ? <section className="mv-reference-match"><header><b>对标画面复刻约束</b><span>{shot.reference_match.source_time}</span></header><p>{shot.reference_match.visual_blueprint}</p><small><b>主体布局：</b>{shot.reference_match.subject_layout}</small><small><b>动作节拍：</b>{shot.reference_match.action_timing}</small><small><b>摄影运镜：</b>{shot.reference_match.camera_motion}</small><small><b>切镜衔接：</b>{shot.reference_match.transition}</small></section> : null}{shot.director_method && <section className="mv-shot-method"><header><b>导演方法实际执行</b><span>5 / 5</span></header><dl><div><dt>构图</dt><dd>{shot.director_method.composition}</dd></div><div><dt>摄影</dt><dd>{shot.director_method.camera}</dd></div><div><dt>光色</dt><dd>{shot.director_method.lighting_color}</dd></div><div><dt>调度</dt><dd>{shot.director_method.blocking}</dd></div><div><dt>节奏</dt><dd>{shot.director_method.rhythm}</dd></div></dl></section>}{shot.corpus_refs?.length ? <section className="mv-corpus-evidence"><header><b>电影语料引用</b><span>{shot.corpus_refs.length} 条</span></header><div>{shot.corpus_refs.map(reference => { const item = corpusById.get(reference); return <span title={item?.text} key={reference}>{item?.title || reference}</span>; })}</div></section> : null}{shot.negative_prompt && <p className="mv-negative-prompt"><b>负面提示词：</b>{shot.negative_prompt}</p>}<div className="mv-shot-tags"><span>{ratio}</span><span>{resolution}</span><span>{model}</span><span>歌词时间轴已锁定</span><span>电影语料已引用</span><span>{analysisHasReferenceVideo ? '对标画面骨架已锁定' : '本次未读取对标视频'}</span><span>镜头衔接已写入</span><span>负面词已写入</span></div></div></article>)}
             </div>
             <section className="mv-generation-decision">
               <div className="storyboard-toolbar"><div><p className="overline">GENERATION DECISION</p><h2>确认本次生成方案</h2><small>提示词确认后直接决定生成模型和交付规格，不再进入单独的“生成中心”步骤。</small></div><span className="mv-cloud-lock">需用户确认后执行</span></div>
