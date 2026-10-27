@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -68,6 +69,29 @@ class ModelsNexusAdapterTests(unittest.TestCase):
             self.assertEqual(server.upstream_model_name({"model": model}), model)
         with self.assertRaises(ValueError):
             server.upstream_model_name({"model": "Seedance 2.5"})
+
+    def test_reference_video_is_normalized_to_even_h264_mp4(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = pathlib.Path(temporary)
+            source = directory / "reference.mkv"
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+                "-i", "testsrc=size=641x359:rate=25", "-t", "0.5", "-c:v", "ffv1", str(source),
+            ], check=True, capture_output=True, timeout=30)
+            files = {"reference": source.name}
+
+            server.normalize_reference_video(directory, files)
+
+            output = directory / files["reference"]
+            probe = subprocess.run([
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name,width,height,pix_fmt", "-of", "json", str(output),
+            ], check=True, capture_output=True, text=True, timeout=30)
+            details = __import__("json").loads(probe.stdout)["streams"][0]
+            self.assertEqual(details["codec_name"], "h264")
+            self.assertEqual(details["pix_fmt"], "yuv420p")
+            self.assertEqual(details["width"] % 2, 0)
+            self.assertEqual(details["height"] % 2, 0)
 
 
 if __name__ == "__main__":

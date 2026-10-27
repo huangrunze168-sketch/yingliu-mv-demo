@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import cgi
 import base64
+import functools
 import hashlib
 import json
 import math
@@ -1013,24 +1014,68 @@ def normalize_audio_upload(directory: pathlib.Path, files: dict[str, str], key: 
     files[key] = final_output.name
 
 
+@functools.lru_cache(maxsize=1)
+def ffmpeg_h264_options() -> tuple[str, ...]:
+    """根据当前服务器 FFmpeg 实际能力选择 H.264 编码器。"""
+    try:
+        completed = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise RuntimeError("无法读取服务器 FFmpeg 编码器列表") from exc
+    encoders = completed.stdout
+    if re.search(r"\blibx264\b", encoders):
+        return ("-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p")
+    if re.search(r"\blibopenh264\b", encoders):
+        return (
+            "-c:v", "libopenh264", "-b:v", "5M", "-maxrate", "8M", "-bufsize", "10M",
+            "-pix_fmt", "yuv420p",
+        )
+    raise RuntimeError("服务器 FFmpeg 缺少可用的 H.264 编码器（libx264/libopenh264）")
+
+
 def normalize_reference_video(directory: pathlib.Path, files: dict[str, str]) -> None:
-    """把任意 FFmpeg 可读对标视频统一为 ModelsNexus 稳定拉取的 MP4/H.264/AAC。"""
+    """把 FFmpeg 可解码的视频统一为 ModelsNexus 可拉取的 MP4/H.264/AAC。"""
     filename = files.get("reference")
     if not filename:
         return
     source = directory / filename
     output = directory / "reference-normalized.mp4"
-    try:
-        subprocess.run([
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
-            "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
-            "-movflags", "+faststart", str(output),
-        ], check=True, capture_output=True, timeout=1800)
-        probe_duration(output, limit=None)
-    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+    # 偶数尺寸、恒定帧率、方形像素和时间戳重建可覆盖手机 MOV、屏幕录制、MKV、
+    # WEBM 以及带旋转元数据的视频。音轨异常时再退回无音轨版本，画面仍可用于拆解和参考。
+    video_filter = "fps=30,scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=lanczos,setsar=1"
+    encoder_options = list(ffmpeg_h264_options())
+    video_options = [
+        "-map", "0:v:0", "-map", "0:a:0?", "-vf",
+        video_filter,
+        *encoder_options,
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+    ]
+    video_only_options = [
+        "-map", "0:v:0", "-vf", video_filter,
+        *encoder_options, "-an",
+    ]
+    attempts = [video_options, video_only_options]
+    errors: list[str] = []
+    for options in attempts:
         output.unlink(missing_ok=True)
-        raise ValueError("reference 无法转换为 ModelsNexus 支持的 MP4/H.264") from exc
+        try:
+            completed = subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-fflags", "+genpts",
+                "-i", str(source), *options, "-map_metadata", "-1", "-sn", "-dn",
+                "-movflags", "+faststart", str(output),
+            ], check=True, capture_output=True, text=True, timeout=1800)
+            probe_duration(output, limit=None)
+            break
+        except subprocess.CalledProcessError as exc:
+            errors.append((exc.stderr or exc.stdout or str(exc)).strip()[-600:])
+        except (subprocess.SubprocessError, OSError, ValueError) as exc:
+            errors.append(str(exc)[-600:])
+    else:
+        output.unlink(missing_ok=True)
+        detail = next((item for item in reversed(errors) if item), "FFmpeg 无法解码该文件的视频流")
+        raise ValueError(f"对标视频无法读取；请确认文件未损坏并包含真实视频画面。FFmpeg：{detail}")
     source.unlink(missing_ok=True)
     final_output = directory / "reference.mp4"
     output.replace(final_output)
@@ -1308,7 +1353,8 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
             if key in form and getattr(form[key], "filename", None):
                 files[key] = save_upload(form[key], directory, key)
         classify_reference_upload(directory, files)
-        normalize_reference_video(directory, files)
+        # Agent 分析只需要从原文件抽帧和识别切点，不应先要求文件满足生成模型的交付编码。
+        # 真正提交 ModelsNexus 时才执行兼容转码。
         normalize_audio_upload(directory, files, "song")
         normalize_audio_upload(directory, files, "voice")
         normalize_audio_upload(directory, files, "reference_audio")
