@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import pathlib
 import tempfile
 import unittest
@@ -61,33 +62,39 @@ class AgentJsonParserTests(unittest.TestCase):
             "has_song": False,
             "has_lyrics": False,
             "has_reference_audio": False,
-            "portrait_count": 0,
-            "reference_video": {"segments": [{"source_time": "00:00.000–00:03.000"}]},
+            "portrait_count": 1,
+            "reference_video": {"duration_seconds": 3.0, "segments": [{"source_time": "00:00.000–00:03.000"}]},
             "corpus_retrieval": {"items": [{"id": "film-1"}]},
         }
         with tempfile.TemporaryDirectory() as temporary:
             directory = pathlib.Path(temporary)
             (directory / "reference.mp4").write_bytes(b"video")
+            (directory / "portrait-1.png").write_bytes(b"image")
             completed = SimpleNamespace(returncode=0, stdout='{"project_summary":"完成"}', stderr="")
             with patch.object(server, "dsh_is_available", return_value=True), \
-                 patch.object(server.subprocess, "run", return_value=completed) as run, \
+                 patch.object(server, "run_dsh_process", return_value=completed) as run, \
                  patch.object(server, "finalize_agent_result", return_value={"provider": "DSH Headless"}):
-                result = server.call_dsh_headless_agent(context, directory, {"reference": "reference.mp4"})
+                result = server.call_dsh_headless_agent(
+                    context,
+                    directory,
+                    {"reference": "reference.mp4", "portrait1": "portrait-1.png"},
+                )
 
             self.assertEqual(result["provider"], "DSH Headless")
             arguments = run.call_args.args[0]
             self.assertEqual(arguments[1:4], ["--profile", "headless", "-"])
             self.assertEqual(run.call_args.kwargs["cwd"], directory)
-            task = run.call_args.kwargs["input"]
-            self.assertIn("video_probe", task)
+            task = run.call_args.kwargs["input_text"]
             self.assertIn("video_analyze", task)
-            self.assertIn("video_ask", task)
-            self.assertIn("只调用一次 video_ask", task)
-            self.assertIn("video_analyze 显式传 maxFrames=24", task)
-            self.assertIn("video_ask，显式传 maxFrames=12", task)
-            self.assertIn("不要把数字时间写入 question", task)
-            manifest = (directory / "agent-context.json").read_text(encoding="utf-8")
-            self.assertIn(str((directory / "reference.mp4").resolve()), manifest)
+            self.assertIn("不要调用 video_probe", task)
+            self.assertIn("显式传 maxFrames=8", task)
+            self.assertIn("禁止调用 video_ask", task)
+            self.assertIn("不要再调用文件工具读取 agent-context.json", task)
+            self.assertIn('"portrait1"', task)
+            self.assertIn("同一个工具调用回合中并行调用 read_image", task)
+            self.assertEqual(run.call_args.kwargs["timeout"], 120)
+            manifest = json.loads((directory / "agent-context.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["files"]["reference"], str((directory / "reference.mp4").resolve()))
             self.assertEqual((directory / "agent-dsh-stdout.txt").read_text(encoding="utf-8"), completed.stdout)
             self.assertEqual((directory / "agent-dsh-stderr.txt").read_text(encoding="utf-8"), completed.stderr)
 

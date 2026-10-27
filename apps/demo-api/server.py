@@ -17,6 +17,7 @@ import mimetypes
 import os
 import pathlib
 import re
+import signal
 import shutil
 import subprocess
 import threading
@@ -1551,6 +1552,37 @@ def dsh_is_available() -> bool:
     return bool(shutil.which(DSH_COMMAND) or pathlib.Path(DSH_COMMAND).is_file())
 
 
+def run_dsh_process(
+    command: list[str],
+    input_text: str,
+    cwd: pathlib.Path,
+    environment: dict[str, str],
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    """运行一次 DSH；超时必须终止整个进程组，避免 FFmpeg/视觉工具残留。"""
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        env=environment,
+        text=True,
+        start_new_session=os.name != "nt",
+    )
+    try:
+        stdout, stderr = process.communicate(input=input_text, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        if os.name != "nt":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+        stdout, stderr = process.communicate()
+        detail = (stderr or stdout or "未返回日志").strip()[-1200:]
+        raise RuntimeError(f"DSH Headless 分析超过 {timeout} 秒，已终止全部子进程：{detail}") from exc
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
 def call_dsh_headless_agent(
     context: dict[str, Any],
     directory: pathlib.Path,
@@ -1566,11 +1598,34 @@ def call_dsh_headless_agent(
     manifest_path = directory / "agent-context.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     reference_path = manifest["files"].get("reference", "")
+    portrait_paths = [
+        value
+        for key, value in manifest["files"].items()
+        if key.startswith("portrait")
+    ]
+    reference_duration = float(context.get("reference_video", {}).get("duration_seconds") or 0)
+    fast_video_path = bool(reference_path and reference_duration <= 20)
+    if fast_video_path:
+        video_tool_rule = (
+            "不要调用 video_probe。且只调用一次 video_analyze，显式传 maxFrames=8。"
+            "禁止调用 video_ask，也不要重复调用 video_analyze；8 帧必须均匀覆盖整个视频并结合场景切点，"
+            "重点分析主体轨迹、逐拍动作、构图、景别、机位、运镜、光色与切镜。"
+            f"若有人物参考图，必须在同一个工具调用回合中并行调用 read_image：{json.dumps(portrait_paths, ensure_ascii=False)}。"
+        )
+    else:
+        video_tool_rule = (
+            "先调用 video_probe，再且只调用一次 video_analyze，显式传 maxFrames=18。"
+            "只有 video_analyze 明确标记某个关键动作无法判断时，才允许调用一次 video_ask，"
+            "显式传 maxFrames=6；不得重复解码同一时间段。"
+        )
+    compact_manifest = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
     task = f"""你是映流 MV 的制作总控 Agent。工作目录是 {directory.resolve()}。
-必须先读取 {manifest_path.resolve()}，只使用其中真实存在的项目物料、导演库索引、电影语料检索结果和歌词时间轴。
+项目上下文已经完整内嵌如下，不要再调用文件工具读取 agent-context.json：
+{compact_manifest}
+只使用上面真实存在的项目物料、导演库索引、电影语料检索结果和歌词时间轴。
 
 执行规则：
-1. 如果存在 reference 文件，必须先调用 video_probe，再调用 video_analyze；video_analyze 显式传 maxFrames=24，重点分析主体数量与轨迹、逐拍动作、构图、景别、机位、推拉摇移跟、光色和切镜。随后只调用一次 video_ask，显式传 maxFrames=12，question 只写“复核整个视频的逐段动作、构图、运镜和切镜”，不要把数字时间写入 question，以确保工具复核完整视频而不是只截取第一个时间窗。最终再按照 context.reference_video.segments 的全部精确时间段逐段组织结果。不要为每段分别调用，避免重复解码与重复上传；不能只看一组抽帧。当前对标视频路径：{reference_path or '未提供'}。
+1. 如果存在 reference 文件：{video_tool_rule} 最终按照 context.reference_video.segments 的全部精确时间段逐段组织结果，不能只描述第一帧。当前对标视频路径：{reference_path or '未提供'}。
 2. 人物参考图全部同级。使用 read_image 逐张检查人物外貌、服装和身份约束。
 3. 对标视频决定画面几何、动作、运镜和切镜；导演方法和电影语料只能增强光色、质感和叙事，不能覆盖对标结构。
 4. reference_breakdown.reference_shots 必须逐项覆盖 context.reference_video.segments，source_time 必须逐字复制，不能漏段。
@@ -1592,15 +1647,12 @@ shots 必须覆盖完整规划时长，且每条 prompt 都必须独立完整。
     environment["DSH_HOME"] = str(DSH_HOME)
     environment["HOME"] = str(DSH_HOME)
     environment.setdefault("VIDEO_LENS_API_KEY", DEEPSEEK_API_KEY)
-    completed = subprocess.run(
+    completed = run_dsh_process(
         [DSH_COMMAND, "--profile", "headless", "-"],
-        input=task,
+        input_text=task,
         cwd=directory,
-        env=environment,
-        text=True,
-        capture_output=True,
-        timeout=DSH_TIMEOUT_SECONDS,
-        check=False,
+        environment=environment,
+        timeout=min(DSH_TIMEOUT_SECONDS, 120 if fast_video_path else 600),
     )
     (directory / "agent-dsh-stdout.txt").write_text(completed.stdout or "", encoding="utf-8")
     (directory / "agent-dsh-stderr.txt").write_text(completed.stderr or "", encoding="utf-8")
