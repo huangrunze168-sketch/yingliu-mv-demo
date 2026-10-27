@@ -701,6 +701,7 @@ def generate_upstream_job(job_id: str) -> None:
             reference_images: list[str] = []
             reference_videos: list[str] = []
             reference_audios: list[str] = []
+            write_state(job_id, stage="正在创建 ModelsNexus 可拉取的短时素材链接", progress=16)
             for key, filename in files.items():
                 if key == "lyrics":
                     continue
@@ -709,11 +710,8 @@ def generate_upstream_job(job_id: str) -> None:
                     raise ValueError("Seedance 参考视频仅支持 MP4/MOV")
                 if key in {"song", "voice"} and path.suffix.lower() not in {".mp3", ".wav"}:
                     raise ValueError("Seedance 参考音频仅支持 MP3/WAV")
-                media_duration = probe_duration(path, limit=None) if key in {"song", "voice"} else 0
-                if key in {"song", "voice"} and media_duration > 15.2:
-                    uri = create_signed_asset_url(job_id, key, path)
-                else:
-                    uri = upload_seedance_asset(job_id, key, path, model)
+                # ModelsNexus 直接拉取两小时有效的签名公网链接，避免大文件再次上传导致 413。
+                uri = create_signed_asset_url(job_id, key, path)
                 media_type = seedance_media_type(key)
                 if media_type == "image":
                     reference_images.append(uri)
@@ -1248,14 +1246,43 @@ class Handler(BaseHTTPRequestHandler):
                 if not source.is_file() or source.parent != job_dir(job_id):
                     raise FileNotFoundError(filename)
                 content_type = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
-                self.send_response(HTTPStatus.OK)
+                file_size = source.stat().st_size
+                range_header = self.headers.get("Range", "")
+                start, end = 0, file_size - 1
+                status = HTTPStatus.OK
+                match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip()) if range_header else None
+                if match:
+                    if match.group(1):
+                        start = int(match.group(1))
+                        end = min(file_size - 1, int(match.group(2))) if match.group(2) else file_size - 1
+                    elif match.group(2):
+                        suffix_size = min(file_size, int(match.group(2)))
+                        start = file_size - suffix_size
+                    if start < 0 or start > end or start >= file_size:
+                        self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                        self.send_header("Content-Range", f"bytes */{file_size}")
+                        self.end_headers()
+                        return
+                    status = HTTPStatus.PARTIAL_CONTENT
+                content_length = end - start + 1
+                self.send_response(status)
                 self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(source.stat().st_size))
+                self.send_header("Content-Length", str(content_length))
+                self.send_header("Accept-Ranges", "bytes")
+                if status == HTTPStatus.PARTIAL_CONTENT:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
                 self.send_header("Cache-Control", "private, no-store, max-age=0")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
                 with source.open("rb") as handle:
-                    shutil.copyfileobj(handle, self.wfile, length=1024 * 1024)
+                    handle.seek(start)
+                    remaining = content_length
+                    while remaining > 0:
+                        chunk = handle.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
             except (ValueError, FileNotFoundError, IndexError):
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "素材链接不存在或已过期"})
             return
