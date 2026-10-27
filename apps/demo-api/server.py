@@ -740,7 +740,7 @@ def generate_upstream_job(job_id: str) -> None:
             payload = {
                 "model": model, "content": content, "duration": requested_duration,
                 "resolution": spec["resolution"], "ratio": ratio,
-                "generate_audio": True, "output_format": "mp4", "watermark": False,
+                "generate_audio": True,
                 "omni_reference_task_type": "reference",
             }
             upstream_id = submit_video_task(job_id, "seedance", payload, MODELSNEXUS_API_KEY)
