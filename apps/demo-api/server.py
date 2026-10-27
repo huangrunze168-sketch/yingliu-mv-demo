@@ -893,8 +893,10 @@ def legacy_render_job(job_id: str) -> None:
 def save_upload(field: cgi.FieldStorage, directory: pathlib.Path, key: str) -> str:
     original_name = pathlib.Path(field.filename or "upload").name
     extension = pathlib.Path(original_name).suffix.lower()
-    if extension not in ALLOWED_EXTENSIONS[key]:
-        raise ValueError(f"{key} 文件格式不支持")
+    if extension not in ALLOWED_EXTENSIONS[key] and key not in {"song", "voice"}:
+        raise ValueError(f"{key} 文件格式不支持：{original_name}")
+    if key in {"song", "voice"} and not re.fullmatch(r"\.[a-z0-9]{1,10}", extension):
+        extension = ".audio"
     filename = f"{key}{extension}"
     target = directory / filename
     with target.open("wb") as handle:
@@ -902,6 +904,33 @@ def save_upload(field: cgi.FieldStorage, directory: pathlib.Path, key: str) -> s
     if target.stat().st_size == 0:
         raise ValueError(f"{key} 文件为空")
     return filename
+
+
+def normalize_audio_upload(directory: pathlib.Path, files: dict[str, str], key: str) -> None:
+    """不依赖上传后缀，交给 FFmpeg 验证并转成 ModelsNexus 可读取的 WAV。"""
+    filename = files.get(key)
+    if not filename:
+        return
+    source = directory / filename
+    if source.suffix.lower() == ".wav":
+        # 仍执行探测，避免仅改名为 WAV 的无效文件绕过校验。
+        try:
+            probe_duration(source, limit=None)
+        except (subprocess.SubprocessError, OSError, ValueError) as exc:
+            raise ValueError(f"{key} 不是可读取的音频文件") from exc
+        return
+    output = directory / f"{key}.wav"
+    try:
+        subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+            "-vn", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", str(output),
+        ], check=True, capture_output=True, timeout=600)
+        probe_duration(output, limit=None)
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+        output.unlink(missing_ok=True)
+        raise ValueError(f"{key} 不是 FFmpeg 可读取的音频文件") from exc
+    source.unlink(missing_ok=True)
+    files[key] = output.name
 
 
 def read_lyrics(path: pathlib.Path) -> str:
@@ -1143,6 +1172,8 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
         for key in ALLOWED_EXTENSIONS:
             if key in form and getattr(form[key], "filename", None):
                 files[key] = save_upload(form[key], directory, key)
+        normalize_audio_upload(directory, files, "song")
+        normalize_audio_upload(directory, files, "voice")
         model_name = str(form.getfirst("model", "sd2.5海外版-720p"))[:100]
         model_spec = SEEDANCE_MODEL_SPECS.get(model_name) or MINIMAX_MODEL_SPECS.get(model_name) or {"max_duration": 15}
         if "song" in files:
@@ -1389,6 +1420,8 @@ class Handler(BaseHTTPRequestHandler):
                 for key in ALLOWED_EXTENSIONS:
                     if key in form and getattr(form[key], "filename", None):
                         files[key] = save_upload(form[key], directory, key)
+                normalize_audio_upload(directory, files, "song")
+                normalize_audio_upload(directory, files, "voice")
                 now = int(time.time())
                 generation_plan_raw = str(form.getfirst("generation_plan", "")).strip()
                 generation_plan = json.loads(generation_plan_raw) if generation_plan_raw else None
