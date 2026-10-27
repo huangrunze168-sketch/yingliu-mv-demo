@@ -44,12 +44,12 @@ class ModelsNexusAdapterTests(unittest.TestCase):
             "sd2.5海外版-720p", server.SEEDANCE_MODEL_SPECS["sd2.5海外版-720p"],
             "16:9", 30, content,
         )
-        self.assertEqual(set(payload), {"model", "content", "duration", "ratio", "generate_audio", "mode"})
+        self.assertEqual(set(payload), {"model", "content", "duration", "ratio", "generate_audio"})
         self.assertEqual(payload["content"], content)
         self.assertNotIn("prompt", payload)
         self.assertNotIn("output_format", payload)
         self.assertNotIn("resolution", payload)
-        self.assertEqual(payload["mode"], "reference")
+        self.assertNotIn("mode", payload)
 
     def test_minimax_payload_does_not_use_legacy_compatibility_fields(self) -> None:
         content = [{"type": "text", "text": "提示词"}]

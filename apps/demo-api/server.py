@@ -642,7 +642,6 @@ def seedance_payload(model: str, spec: dict[str, Any], ratio: str, duration: int
         "duration": duration,
         "ratio": ratio,
         "generate_audio": True,
-        "mode": "reference",
     }
 
 
