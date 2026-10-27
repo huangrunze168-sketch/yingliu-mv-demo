@@ -675,12 +675,27 @@ def prompt_for_window(state: dict[str, Any], start: float, end: float) -> str:
 def generate_upstream_job(job_id: str) -> None:
     directory = job_dir(job_id)
     state = read_state(job_id)
-    audio = directory / state["files"]["song"]
+    files = state.get("files") if isinstance(state.get("files"), dict) else {}
+    audio = directory / files["song"] if "song" in files else None
     output = directory / "result.mp4"
 
     try:
-        duration = probe_duration(audio, limit=None)
         model = upstream_model_name(state)
+        spec = SEEDANCE_MODEL_SPECS.get(model) or MINIMAX_MODEL_SPECS[model]
+        if audio is not None:
+            duration = probe_duration(audio, limit=None)
+        else:
+            duration = float(state.get("planned_duration") or spec["max_duration"])
+            plan = state.get("generation_plan")
+            shots = plan.get("shots") if isinstance(plan, dict) else None
+            ends: list[float] = []
+            for shot in shots if isinstance(shots, list) else []:
+                sync = shot.get("lyrics_sync") if isinstance(shot, dict) and isinstance(shot.get("lyrics_sync"), dict) else {}
+                match = re.search(r"(\d{1,3}):(\d{2}(?:\.\d{1,3})?)", str(sync.get("end", "")))
+                if match:
+                    ends.append(int(match.group(1)) * 60 + float(match.group(2)))
+            if ends:
+                duration = max(ends)
         ratio = str(state.get("ratio", "16:9"))
         if ratio not in {"16:9", "9:16", "1:1"}:
             raise ValueError(f"{model} 不支持画幅 {ratio}")
@@ -697,7 +712,6 @@ def generate_upstream_job(job_id: str) -> None:
             requested_duration = round(duration)
             if requested_duration < spec["min_duration"] or requested_duration > spec["max_duration"]:
                 raise ValueError(f"{model} 官方时长范围是 {spec['min_duration']}–{spec['max_duration']} 秒，当前音频 {duration:.2f} 秒")
-            files = state["files"]
             reference_images: list[str] = []
             reference_videos: list[str] = []
             reference_audios: list[str] = []
@@ -742,7 +756,7 @@ def generate_upstream_job(job_id: str) -> None:
             durations = [base + (1 if index < remainder else 0) for index in range(segment_count)]
             if any(value < spec["min_duration"] or value > spec["max_duration"] for value in durations):
                 raise ValueError(f"无法按 MiniMax 官方 {spec['min_duration']}–{spec['max_duration']} 秒范围拆分当前音频")
-            portraits = [(key, directory / filename) for key, filename in state["files"].items() if key.startswith("portrait")][:4]
+            portraits = [(key, directory / filename) for key, filename in files.items() if key.startswith("portrait")][:4]
             reference_images = [create_signed_asset_url(job_id, key, path) for key, path in portraits]
             clips: list[pathlib.Path] = []
             cursor = 0.0
@@ -768,11 +782,14 @@ def generate_upstream_job(job_id: str) -> None:
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
                 "-i", str(concat_file), "-c", "copy", str(joined),
             ], check=True, capture_output=True, timeout=600)
-            subprocess.run([
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(joined), "-i", str(audio),
-                "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-                "-shortest", "-movflags", "+faststart", str(output),
-            ], check=True, capture_output=True, timeout=600)
+            if audio is not None:
+                subprocess.run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(joined), "-i", str(audio),
+                    "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                    "-shortest", "-movflags", "+faststart", str(output),
+                ], check=True, capture_output=True, timeout=600)
+            else:
+                joined.replace(output)
         final_duration = probe_duration(output, limit=None)
         write_state(job_id, status="completed", stage="上游 AI 成片已就绪", progress=100,
                     duration=round(final_duration, 2), result_url=f"{PUBLIC_PREFIX}/{job_id}/result.mp4",
@@ -996,7 +1013,7 @@ def reference_sample_times(duration: float, cuts: list[float], limit: int = 10) 
 def call_deepseek_agent(context: dict[str, Any], image_inputs: list[dict[str, str]]) -> dict[str, Any]:
     if not DEEPSEEK_API_KEY:
         raise RuntimeError("DeepSeek Agent 未配置")
-    system_prompt = """你是专业音乐 MV 制作 Agent。你必须真正分析用户需求、歌词、音频时长、全部同级人物参考图、可选对标视频画面，并严格执行随请求提供的结构化导演方法库。若提供对标视频，它是本次生成的权威画面骨架：按时间顺序拆解并尽量复刻每段的具体画面布局、主体数量与位置、前中后景关系、动作顺序和节拍、景别、机位、镜头运动方向以及切镜时间；只按照用户上传物料替换人物身份、服装、场景语义、文字和品牌元素。导演库与电影语料是第二层修辞增强，只用于把这个画面骨架润色为可执行的光线、色彩、质感、摄影和叙事表达，不得擅自改掉对标画面的关键几何关系、动作节奏和镜头时序。导演姓名只是方法库索引，绝不能用“某某风格”“采用某导演方法”或在提示词里附加导演姓名来代替执行。不要声称看到了未提供的内容，不要输出分析过程。只输出合法 JSON，结构严格为：
+    system_prompt = """你是专业音乐 MV 制作 Agent。所有上传物料均为可选项。你必须先识别本次实际提供了哪些物料，只分析真实存在的用户需求、歌曲、歌词、同级人物参考图、对标视频和参考音色；未提供的物料必须明确标记为未提供，并依靠制作需求、导演库与电影语料补全创作方案，绝不能假装已经读取。若提供对标视频，它是本次生成的权威画面骨架：按时间顺序拆解并尽量复刻每段的具体画面布局、主体数量与位置、前中后景关系、动作顺序和节拍、景别、机位、镜头运动方向以及切镜时间；只按照用户上传物料替换人物身份、服装、场景语义、文字和品牌元素。导演库与电影语料是第二层修辞增强，只用于把这个画面骨架润色为可执行的光线、色彩、质感、摄影和叙事表达，不得擅自改掉对标画面的关键几何关系、动作节奏和镜头时序。导演姓名只是方法库索引，绝不能用“某某风格”“采用某导演方法”或在提示词里附加导演姓名来代替执行。不要输出分析过程。只输出合法 JSON，结构严格为：
 {
   "project_summary": "一句话项目判断",
   "creative_brief": "完整创作策略",
@@ -1028,8 +1045,10 @@ analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物�
         f"电影语料检索版本：{context['corpus_retrieval']['version']}\n"
         f"电影语料检索查询：{context['corpus_retrieval']['query']}\n"
         f"电影语料检索结果（必须按 id 引用并实际执行）：{json.dumps(context['corpus_retrieval']['items'], ensure_ascii=False)}\n"
-        f"音频时长：{context['duration']:.2f} 秒\n"
-        f"人物参考图数量：{context['portrait_count']}，全部同级\n"
+        f"原始音频：{'已提供' if context['has_song'] else '未提供，时长由目标模型与现有物料推定'}\n"
+        f"歌词文件：{'已提供' if context['has_lyrics'] else '未提供，按纯音乐规划且不得编造歌词'}\n"
+        f"本次规划时长：{context['duration']:.2f} 秒\n"
+        f"人物参考图数量：{context['portrait_count']}，已提供的参考图全部同级；为 0 时不得编造人物外貌\n"
         f"参考视频：{'已提供，附带抽帧' if context['has_reference'] else '未提供'}\n"
         f"对标视频技术拆解上下文：{json.dumps(context['reference_video'], ensure_ascii=False)}\n"
         f"结构化歌词时间轴（镜头必须与此对齐）：{json.dumps(context['lyric_timeline'], ensure_ascii=False)}\n"
@@ -1116,9 +1135,6 @@ analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物�
 
 
 def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
-    for required in ("song", "lyrics", "portrait"):
-        if required not in form or not getattr(form[required], "filename", None):
-            raise ValueError("请上传原始音频、歌词和至少一张人物参考图")
     analysis_id = uuid.uuid4().hex
     directory = DATA_ROOT / f"analysis-{analysis_id}"
     directory.mkdir(mode=0o750)
@@ -1127,7 +1143,14 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
         for key in ALLOWED_EXTENSIONS:
             if key in form and getattr(form[key], "filename", None):
                 files[key] = save_upload(form[key], directory, key)
-        duration = probe_duration(directory / files["song"], limit=None)
+        model_name = str(form.getfirst("model", "sd2.5海外版-720p"))[:100]
+        model_spec = SEEDANCE_MODEL_SPECS.get(model_name) or MINIMAX_MODEL_SPECS.get(model_name) or {"max_duration": 15}
+        if "song" in files:
+            duration = probe_duration(directory / files["song"], limit=None)
+        elif "reference" in files:
+            duration = min(probe_duration(directory / files["reference"], limit=None), float(model_spec["max_duration"]))
+        else:
+            duration = float(model_spec["max_duration"])
         image_inputs: list[dict[str, str]] = []
         portrait_keys = [key for key in ALLOWED_EXTENSIONS if key.startswith("portrait") and key in files]
         for index, key in enumerate(portrait_keys):
@@ -1158,7 +1181,7 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
             except (subprocess.SubprocessError, OSError, ValueError) as exc:
                 raise RuntimeError(f"对标视频拆解失败：{exc}") from exc
         director = str(form.getfirst("director", "王家卫"))[:60]
-        lyrics = read_lyrics(directory / files["lyrics"])
+        lyrics = read_lyrics(directory / files["lyrics"]) if "lyrics" in files else ""
         corpus_query = "\n".join([
             str(form.getfirst("title", "未命名 MV")),
             str(form.getfirst("requirements", "")),
@@ -1171,12 +1194,14 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
             "title": str(form.getfirst("title", "未命名 MV"))[:100],
             "requirements": str(form.getfirst("requirements", ""))[:4000],
             "ratio": str(form.getfirst("ratio", "16:9")),
-            "model": str(form.getfirst("model", "Seedance 2.5"))[:100],
+            "model": model_name,
             "resolution": str(form.getfirst("resolution", "720p")),
             "director": director,
             "corpus_retrieval": retrieve_film_corpus(director, director_methods, corpus_query),
             "duration": duration,
             "portrait_count": len(portrait_keys),
+            "has_song": "song" in files,
+            "has_lyrics": "lyrics" in files,
             "has_reference": "reference" in files,
             "reference_video": reference_video,
             "lyrics": lyrics,
@@ -1338,10 +1363,6 @@ class Handler(BaseHTTPRequestHandler):
             if request_path == "/analyze":
                 self.send_json(HTTPStatus.OK, analyze_form(form))
                 return
-
-            for required in ("song", "lyrics", "portrait"):
-                if required not in form or not getattr(form[required], "filename", None):
-                    raise ValueError("请上传原始音频、歌词和至少一张人物参考图")
 
             client_request_id = str(form.getfirst("client_request_id", "")).strip()[:200] or uuid.uuid4().hex
             request_digest = hashlib.sha256(client_request_id.encode("utf-8")).hexdigest()

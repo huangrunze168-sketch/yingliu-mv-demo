@@ -118,9 +118,9 @@ function generationApiModel(model: ModelName, resolution: string) {
 }
 
 const assetConfig: Array<{ key: AssetKey; title: string; copy: string; accept: string; required: boolean; tag: string }> = [
-  { key: 'song', title: '原始音频', copy: '作为整支 MV 的时间基准', accept: 'audio/*', required: true, tag: 'MP3 · WAV · FLAC' },
-  { key: 'lyrics', title: '歌词文件', copy: '用于逐句对齐、口型与切点', accept: '.txt,.lrc,text/plain', required: true, tag: 'TXT · LRC' },
-  { key: 'portrait', title: '人物参考图', copy: '支持多张，用于补充正脸、侧脸、全身和服装', accept: 'image/*', required: true, tag: '最多 8 张' },
+  { key: 'song', title: '原始音频', copy: '可选；上传后作为整支 MV 的时间基准', accept: 'audio/*', required: false, tag: 'MP3 · WAV · FLAC' },
+  { key: 'lyrics', title: '歌词文件', copy: '可选；上传后用于逐句对齐、口型与切点', accept: '.txt,.lrc,text/plain', required: false, tag: 'TXT · LRC' },
+  { key: 'portrait', title: '人物参考图', copy: '可选；支持多张，用于补充正脸、侧脸、全身和服装', accept: 'image/*', required: false, tag: '最多 8 张' },
   { key: 'reference', title: '参考视频', copy: '可选，用于提取镜头语言与视觉节奏', accept: 'video/*', required: false, tag: 'MP4 · MOV' },
   { key: 'voice', title: '参考音色', copy: '可选，用于生成新演唱音轨', accept: 'audio/*', required: false, tag: 'MP3 · WAV' },
 ];
@@ -458,23 +458,22 @@ export function CreateFlowDemo() {
   };
 
   const runAgentAnalysis = async () => {
-    if (!assets.song || !assets.lyrics || assets.portrait.length === 0) return;
     setActiveStep(1);
     setAgentAnalyzing(true);
     setAgentAnalysisComplete(false);
     setAgentAnalysis(null);
     setAgentAnalysisError('');
-    setNotice('项目素材正在安全上传，DeepSeek Agent 将真实读取并分析。');
+    setNotice('正在提交项目需求和已选择物料，DeepSeek Agent 将只分析本次真实提供的内容。');
     const body = new FormData();
     body.append('title', projectName || '未命名 MV');
     body.append('requirements', requirements);
     body.append('ratio', ratio);
-    body.append('model', modelProfiles[model].apiModel);
+    body.append('model', generationApiModel(model, resolution));
     body.append('resolution', resolution);
     body.append('director', director);
-    body.append('song', assets.song);
-    body.append('lyrics', assets.lyrics);
-    body.append('portrait', assets.portrait[0]);
+    if (assets.song) body.append('song', assets.song);
+    if (assets.lyrics) body.append('lyrics', assets.lyrics);
+    if (assets.portrait[0]) body.append('portrait', assets.portrait[0]);
     assets.portrait.slice(1, 8).forEach((file, index) => body.append(`portrait_${index + 2}`, file));
     if (assets.reference) body.append('reference', assets.reference);
     try {
@@ -497,10 +496,6 @@ export function CreateFlowDemo() {
   };
 
   const nextStep = async () => {
-    if (activeStep === 0 && !requiredReady) {
-      setNotice('请先补齐原始音频、歌词和至少一张人物参考图。');
-      return;
-    }
     if (activeStep === 0) {
       await runAgentAnalysis();
       return;
@@ -520,9 +515,9 @@ export function CreateFlowDemo() {
 
   const startDemoRun = async () => {
     if (submissionLockRef.current) return;
-    if (!requiredReady || !assets.song || !assets.lyrics || assets.portrait.length === 0) {
-      setActiveStep(0);
-      setNotice('请先补齐原始音频、歌词和至少一张人物参考图。');
+    if (!agentAnalysisComplete || !agentAnalysis) {
+      setActiveStep(1);
+      setNotice('请先让 Agent 根据当前需求和已上传物料生成分镜方案。');
       return;
     }
     submissionLockRef.current = true;
@@ -540,9 +535,9 @@ export function CreateFlowDemo() {
       body.append('model', generationApiModel(model, resolution));
       body.append('resolution', resolution);
       body.append('director', director);
-      body.append('song', assets.song);
-      body.append('lyrics', assets.lyrics);
-      body.append('portrait', assets.portrait[0]);
+      if (assets.song) body.append('song', assets.song);
+      if (assets.lyrics) body.append('lyrics', assets.lyrics);
+      if (assets.portrait[0]) body.append('portrait', assets.portrait[0]);
       assets.portrait.slice(1, 8).forEach((file, index) => body.append(`portrait_${index + 2}`, file));
       if (assets.reference) body.append('reference', assets.reference);
       if (assets.voice) body.append('voice', assets.voice);
@@ -746,7 +741,7 @@ export function CreateFlowDemo() {
             </section>
             <aside className="create-side">
               <div className="create-analysis mv-summary-card">
-                <p className="overline">UPLOAD STATUS</p><h2>{requiredReady ? '素材已就绪' : '等待素材'}</h2>
+                <p className="overline">UPLOAD STATUS</p><h2>Agent 按现有物料分析</h2>
                 <ul className="summary-list">
                   {assetConfig.map(item => <li key={item.key}><span>{item.title}</span><b className={assetReady(item.key) ? 'status-ready' : ''}>{assetReady(item.key) ? item.key === 'portrait' ? `${assets.portrait.length} 张` : '已选择' : item.required ? '必填' : '可选'}</b></li>)}
                 </ul>
@@ -768,7 +763,7 @@ export function CreateFlowDemo() {
           </section>
           ) : (
           <div className="mv-analysis-stage">
-            <div className="mv-stage-title"><div><p className="overline">AGENT CONTEXT ANALYSIS</p><h2>Agent 已理解你的需求并分析全部物料</h2><p>不是直接套模板：Agent 会把制作要求、歌曲、歌词、参考图组与可选参考片合并为同一个项目上下文。</p></div><span>4 类上下文已结构化</span></div>
+            <div className="mv-stage-title"><div><p className="overline">AGENT CONTEXT ANALYSIS</p><h2>Agent 已理解需求并分析本次已提供物料</h2><p>所有物料均可选：Agent 只读取真实上传的内容，缺失部分由需求、导演库和电影语料补全，不会假装已经读取。</p></div><span>项目上下文已结构化</span></div>
             <section className="mv-agent-logic"><span>01 读取需求</span><i>→</i><span>02 分析物料</span><i>→</i><span>03 建立约束</span><i>→</i><span>04 形成创作简报</span><i>→</i><span>05 交给导演方案</span></section>
             <div className="mv-analysis-grid">
               {displayedCards.map(({ title, value, copy }, index) => <article key={title}><span>0{index + 1}</span><h3>{title}</h3><b>{value}</b><p>{copy}</p></article>)}
