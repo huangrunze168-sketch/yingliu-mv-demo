@@ -41,6 +41,7 @@ type AgentShot = {
     blocking: string;
     rhythm: string;
   };
+  corpus_refs?: string[];
   prompt: string;
   negative_prompt?: string;
 };
@@ -51,6 +52,13 @@ type AgentAnalysis = {
   timeline: Array<{ time: string; label: string }>;
   material_observations: string[];
   director_application: string;
+  corpus_retrieval?: {
+    version: string;
+    director: string;
+    coverage: string[];
+    items: Array<{ id: string; category: string; title: string; text: string; score: number }>;
+    stats: { director_entries: number; general_entries: number; returned: number };
+  };
   shots: AgentShot[];
   provider: string;
   model: string;
@@ -552,6 +560,8 @@ export function CreateFlowDemo() {
   const durationLabel = job?.duration ? `${Math.floor(job.duration / 60).toString().padStart(2, '0')}:${Math.floor(job.duration % 60).toString().padStart(2, '0')}` : '待生成';
   const displayedShots: AgentShot[] = agentAnalysis?.shots ?? [];
   const displayedCards = agentAnalysis?.analysis_cards ?? [];
+  const corpusItems = agentAnalysis?.corpus_retrieval?.items ?? [];
+  const corpusById = useMemo(() => new Map(corpusItems.map(item => [item.id, item])), [corpusItems]);
 
   if (pageView === 'projects') {
     return (
@@ -731,11 +741,11 @@ export function CreateFlowDemo() {
         {activeStep === 1 && agentAnalysisComplete && (
           <div className="storyboard-shell">
             <div className="storyboard-toolbar"><div><p className="overline">AGENT MASTER PROMPTS · {director}</p><h2>Agent 全能提示词输出</h2><small>{agentAnalysis?.creative_brief}</small></div><span className="mv-gate-pass">{displayedShots.length} 份真实提示词待确认</span></div>
-            <section className="mv-master-prompt-source"><div><small>AGENT INPUT</small><b>用户需求 + 歌曲/歌词 + 人物参考图组 + 可选参考片 + {director} 导演方法</b></div><span>→</span><div><small>AGENT OUTPUT</small><b>统一角色设定 + 逐镜画面 + 摄影运镜 + 镜头衔接 + 负面约束</b></div></section>
-            <section className="mv-director-proof"><div><small>DIRECTOR METHOD EXECUTION</small><h3>{director} · 方法库已参与推理</h3></div><p>{agentAnalysis?.director_application}</p><span>不是姓名标签</span></section>
+            <section className="mv-master-prompt-source"><div><small>AGENT INPUT</small><b>用户需求 + 歌曲/歌词 + 人物参考图组 + 可选参考片 + 电影语料检索结果</b></div><span>→</span><div><small>AGENT OUTPUT</small><b>统一角色设定 + 逐镜画面 + 摄影运镜 + 镜头衔接 + 负面约束</b></div></section>
+            <section className="mv-director-proof"><div><small>FILM CORPUS RETRIEVAL</small><h3>{director} · 电影语料已检索并参与推理</h3></div><p>{agentAnalysis?.director_application}</p><span>{corpusItems.length ? `${corpusItems.length} 条命中 · ${agentAnalysis?.corpus_retrieval?.coverage.length || 0} 类覆盖` : '等待检索证据'}</span></section>
             <div className="mv-prompt-gate-banner"><div><span>✓</span><p><b>七项提示词门禁</b><small>歌词时间窗 · 人物一致性 · 场景、动作、景别 · 摄影和运镜 · 导演方法 · 负面提示词 · 镜头衔接</small></p></div><em>本步骤只出提示词，不生成图片</em></div>
             <div className="storyboard-grid mv-shot-grid">
-              {displayedShots.map((shot, index) => <article className="shot-card" key={shot.id}><div className={`shot-media mv-shot-${(index % 6) + 1}`}><span>{shot.id}</span><b>{shot.time}</b></div><div className="shot-card-copy"><div className="shot-card-title"><span>{String(index + 1).padStart(2, '0')}</span><i>DeepSeek 真实输出</i></div><h3>{shot.title}</h3>{shot.lyrics_sync ? <section className="mv-lyrics-sync"><header><b>{shot.lyrics_sync.start}–{shot.lyrics_sync.end}</b><span>{shot.lyrics_sync.section}</span></header><p>{shot.lyrics_sync.text}</p><small>切点：{shot.lyrics_sync.cut_on}</small></section> : shot.lyrics_window && <small className="mv-shot-lyrics">歌词时间窗：{shot.lyrics_window}</small>}<p>{shot.prompt}</p>{shot.director_method && <section className="mv-shot-method"><header><b>导演方法实际执行</b><span>5 / 5</span></header><dl><div><dt>构图</dt><dd>{shot.director_method.composition}</dd></div><div><dt>摄影</dt><dd>{shot.director_method.camera}</dd></div><div><dt>光色</dt><dd>{shot.director_method.lighting_color}</dd></div><div><dt>调度</dt><dd>{shot.director_method.blocking}</dd></div><div><dt>节奏</dt><dd>{shot.director_method.rhythm}</dd></div></dl></section>}{shot.negative_prompt && <p className="mv-negative-prompt"><b>负面提示词：</b>{shot.negative_prompt}</p>}<div className="mv-shot-tags"><span>{ratio}</span><span>{resolution}</span><span>{model}</span><span>歌词时间轴已锁定</span><span>导演方法 5/5</span><span>镜头衔接已写入</span><span>负面词已写入</span></div></div></article>)}
+              {displayedShots.map((shot, index) => <article className="shot-card" key={shot.id}><div className={`shot-media mv-shot-${(index % 6) + 1}`}><span>{shot.id}</span><b>{shot.time}</b></div><div className="shot-card-copy"><div className="shot-card-title"><span>{String(index + 1).padStart(2, '0')}</span><i>DeepSeek 真实输出</i></div><h3>{shot.title}</h3>{shot.lyrics_sync ? <section className="mv-lyrics-sync"><header><b>{shot.lyrics_sync.start}–{shot.lyrics_sync.end}</b><span>{shot.lyrics_sync.section}</span></header><p>{shot.lyrics_sync.text}</p><small>切点：{shot.lyrics_sync.cut_on}</small></section> : shot.lyrics_window && <small className="mv-shot-lyrics">歌词时间窗：{shot.lyrics_window}</small>}<p>{shot.prompt}</p>{shot.director_method && <section className="mv-shot-method"><header><b>导演方法实际执行</b><span>5 / 5</span></header><dl><div><dt>构图</dt><dd>{shot.director_method.composition}</dd></div><div><dt>摄影</dt><dd>{shot.director_method.camera}</dd></div><div><dt>光色</dt><dd>{shot.director_method.lighting_color}</dd></div><div><dt>调度</dt><dd>{shot.director_method.blocking}</dd></div><div><dt>节奏</dt><dd>{shot.director_method.rhythm}</dd></div></dl></section>}{shot.corpus_refs?.length ? <section className="mv-corpus-evidence"><header><b>电影语料引用</b><span>{shot.corpus_refs.length} 条</span></header><div>{shot.corpus_refs.map(reference => { const item = corpusById.get(reference); return <span title={item?.text} key={reference}>{item?.title || reference}</span>; })}</div></section> : null}{shot.negative_prompt && <p className="mv-negative-prompt"><b>负面提示词：</b>{shot.negative_prompt}</p>}<div className="mv-shot-tags"><span>{ratio}</span><span>{resolution}</span><span>{model}</span><span>歌词时间轴已锁定</span><span>电影语料已引用</span><span>镜头衔接已写入</span><span>负面词已写入</span></div></div></article>)}
             </div>
             <section className="mv-generation-decision">
               <div className="storyboard-toolbar"><div><p className="overline">GENERATION DECISION</p><h2>确认本次生成方案</h2><small>提示词确认后直接决定生成模型和交付规格，不再进入单独的“生成中心”步骤。</small></div><span className="mv-cloud-lock">需用户确认后执行</span></div>

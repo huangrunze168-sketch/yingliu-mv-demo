@@ -28,7 +28,9 @@ from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse
+
+from film_corpus import public_corpus_catalog, retrieve_film_corpus
 
 
 HOST = os.environ.get("YINGLIU_DEMO_HOST", "127.0.0.1")
@@ -972,17 +974,18 @@ def call_deepseek_agent(context: dict[str, Any], image_urls: list[str]) -> dict[
   "analysis_cards": [{"title":"需求理解","value":"短结论","copy":"具体依据"}],
   "timeline": [{"time":"00:00","label":"段落或情绪"}],
   "material_observations": ["从参考物料得到的具体观察"],
-  "director_application": "如何将导演方法转译为本项目的摄影、构图、光线和调度",
+  "director_application": "如何将检索命中的电影语料转译为本项目的摄影、构图、光线和调度",
   "shots": [{
     "id":"SH01","time":"00:00–00:06","title":"镜头标题",
     "lyrics_window":"00:00.000–00:06.000 · 对应歌词原文",
     "lyrics_sync":{"start":"00:00.000","end":"00:06.000","text":"该时间段歌词原文或纯音乐","section":"主歌/副歌/间奏等","cut_on":"具体节拍、字词或动作切点"},
+    "corpus_refs":["本镜实际使用的语料 ID，至少 3 项"],
     "director_method":{"composition":"本镜构图落地","camera":"焦段、机位和运镜落地","lighting_color":"光线和色彩落地","blocking":"人物调度落地","rhythm":"节奏与切点落地"},
     "prompt":"必须以【时间轴 00:00.000–00:06.000｜歌词：该时间段歌词原文】开头，再写已完全展开的画面和导演方法；不得出现导演姓名或某某风格字样",
     "negative_prompt":"字幕、水印、畸形肢体、面部漂移等具体负面约束"
   }]
 }
-analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物参考图、参考片与镜头策略。shots 数量必须根据本次真实音频时长、歌词结构和节奏动态决定，每镜通常 4–8 秒并覆盖完整音频，不得固定为 6 项。必须严格依据输入的结构化歌词时间轴划分镜头，不得改写、遗漏或编造歌词；跨越多句歌词的镜头要把该时间窗内所有歌词写入 lyrics_sync.text 和 prompt。纯音乐段必须明确写“纯音乐”。每条 prompt 必须独立完整，不得写“同上”。每个 director_method 的五项都必须是针对该镜头的具体执行方案，不能复述方法库原文。参考图没有主次之分。"""
+analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物参考图、参考片与镜头策略。shots 数量必须根据本次真实音频时长、歌词结构和节奏动态决定，每镜通常 4–8 秒并覆盖完整音频，不得固定为 6 项。必须严格依据输入的结构化歌词时间轴划分镜头，不得改写、遗漏或编造歌词；跨越多句歌词的镜头要把该时间窗内所有歌词写入 lyrics_sync.text 和 prompt。纯音乐段必须明确写“纯音乐”。每条 prompt 必须独立完整，不得写“同上”。每个 director_method 的五项都必须是针对该镜头的具体执行方案，不能复述语料原文。每镜的 corpus_refs 必须从检索结果的 id 中选择，至少引用 3 项，且引用必须与本镜实际执行内容一致；corpus_refs 只允许出现在 JSON 元数据字段，prompt 和 negative_prompt 正文严禁出现任何语料 ID。参考图没有主次之分。"""
     user_text = (
         "请根据以下真实项目上下文输出 JSON：\n"
         f"项目名称：{context['title']}\n"
@@ -991,7 +994,9 @@ analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物�
         f"目标模型：{context['model']}\n"
         f"输出清晰度：{context['resolution']}\n"
         f"导演方法库索引：{context['director']}\n"
-        f"结构化导演方法库（必须逐项执行，不得只写姓名）：{json.dumps(context['director_profile'], ensure_ascii=False)}\n"
+        f"电影语料检索版本：{context['corpus_retrieval']['version']}\n"
+        f"电影语料检索查询：{context['corpus_retrieval']['query']}\n"
+        f"电影语料检索结果（必须按 id 引用并实际执行）：{json.dumps(context['corpus_retrieval']['items'], ensure_ascii=False)}\n"
         f"音频时长：{context['duration']:.2f} 秒\n"
         f"人物参考图数量：{context['portrait_count']}，全部同级\n"
         f"参考视频：{'已提供，附带抽帧' if context['has_reference'] else '未提供'}\n"
@@ -1037,6 +1042,7 @@ analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物�
     if not isinstance(cards, list) or len(cards) != 4 or not isinstance(shots, list) or len(shots) < 1:
         raise RuntimeError("DeepSeek 返回结构不完整，请重试")
     required_method_fields = {"composition", "camera", "lighting_color", "blocking", "rhythm"}
+    corpus_ids = {str(item.get("id")) for item in context["corpus_retrieval"]["items"]}
     for shot in shots:
         method = shot.get("director_method") if isinstance(shot, dict) else None
         if not isinstance(method, dict) or not required_method_fields.issubset(method) or any(not str(method[key]).strip() for key in required_method_fields):
@@ -1048,6 +1054,12 @@ analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物�
         prompt = str(shot.get("prompt", ""))
         if str(lyrics_sync["text"]).strip() not in prompt or str(lyrics_sync["start"]).strip() not in prompt or str(lyrics_sync["end"]).strip() not in prompt:
             raise RuntimeError("分镜提示词未写入对应歌词和起止时间，请重新分析")
+        corpus_refs = shot.get("corpus_refs") if isinstance(shot, dict) else None
+        if not isinstance(corpus_refs, list) or len(corpus_refs) < 3 or any(str(item) not in corpus_ids for item in corpus_refs):
+            raise RuntimeError("分镜未引用有效的电影语料检索结果，请重新分析")
+        if any(corpus_id in prompt or corpus_id in str(shot.get("negative_prompt", "")) for corpus_id in corpus_ids):
+            raise RuntimeError("分镜提示词正文不得出现电影语料内部编号，请重新分析")
+    result["corpus_retrieval"] = context["corpus_retrieval"]
     result["provider"] = "DeepSeek"
     result["model"] = api_payload.get("model", DEEPSEEK_MODEL)
     result["usage"] = api_payload.get("usage", {})
@@ -1078,6 +1090,14 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
                 pass
         director = str(form.getfirst("director", "王家卫"))[:60]
         lyrics = read_lyrics(directory / files["lyrics"])
+        corpus_query = "\n".join([
+            str(form.getfirst("title", "未命名 MV")),
+            str(form.getfirst("requirements", "")),
+            lyrics,
+            f"画幅 {form.getfirst('ratio', '16:9')}，模型 {form.getfirst('model', 'Seedance 2.5')}，清晰度 {form.getfirst('resolution', '720p')}",
+            f"人物参考图 {len(portrait_keys)} 张，参考视频 {'有' if 'reference' in files else '无'}",
+        ])
+        director_methods = DIRECTOR_METHODS.get(director, DIRECTOR_METHODS["王家卫"])
         context = {
             "title": str(form.getfirst("title", "未命名 MV"))[:100],
             "requirements": str(form.getfirst("requirements", ""))[:4000],
@@ -1085,7 +1105,7 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
             "model": str(form.getfirst("model", "Seedance 2.5"))[:100],
             "resolution": str(form.getfirst("resolution", "720p")),
             "director": director,
-            "director_profile": DIRECTOR_METHODS.get(director, DIRECTOR_METHODS["王家卫"]),
+            "corpus_retrieval": retrieve_film_corpus(director, director_methods, corpus_query),
             "duration": duration,
             "portrait_count": len(portrait_keys),
             "has_reference": "reference" in files,
@@ -1114,7 +1134,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path.rstrip("/")
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path.rstrip("/")
         if path == "/projects":
             projects = sorted(read_projects(), key=lambda item: int(item.get("updated_at", 0)), reverse=True)
             self.send_json(HTTPStatus.OK, {"projects": projects, "server_time": int(time.time())})
@@ -1131,6 +1152,16 @@ class Handler(BaseHTTPRequestHandler):
                     "deepseek": bool(DEEPSEEK_API_KEY),
                 },
             })
+            return
+        if path == "/corpus/directors":
+            self.send_json(HTTPStatus.OK, public_corpus_catalog(DIRECTOR_METHODS))
+            return
+        if path == "/corpus/search":
+            parameters = parse_qs(parsed_url.query)
+            director = str(parameters.get("director", ["王家卫"])[0])[:60]
+            query = str(parameters.get("q", [""])[0])[:4000]
+            methods = DIRECTOR_METHODS.get(director, DIRECTOR_METHODS["王家卫"])
+            self.send_json(HTTPStatus.OK, retrieve_film_corpus(director, methods, query))
             return
         if path.startswith("/assets/"):
             try:
