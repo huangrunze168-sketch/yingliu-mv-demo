@@ -14,7 +14,7 @@ SPEC.loader.exec_module(server)
 
 
 class ModelsNexusAdapterTests(unittest.TestCase):
-    def test_content_uses_all_supported_materials_as_peers(self) -> None:
+    def test_reference_builder_only_returns_typed_urls(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = pathlib.Path(temporary)
             files = {"portrait": "portrait.png", "portrait_2": "portrait-2.png",
@@ -29,40 +29,91 @@ class ModelsNexusAdapterTests(unittest.TestCase):
                 return f"https://assets.example/{key}"
 
             with patch.object(server, "create_signed_asset_url", side_effect=fake_url):
-                content = server.build_models_nexus_content("job-1", directory, files, "完整提示词")
+                references = server.build_model_references("job-1", directory, files)
 
-        self.assertEqual(content[0], {"type": "text", "text": "完整提示词"})
-        self.assertEqual([item["role"] for item in content[1:]], [
-            "reference_image", "reference_image", "reference_video",
-            "reference_audio", "reference_audio", "reference_audio",
-        ])
-        self.assertEqual(len(content), 7)
+        self.assertEqual(references.images, (
+            "https://assets.example/portrait", "https://assets.example/portrait_2",
+        ))
+        self.assertEqual(references.videos, ("https://assets.example/reference",))
+        self.assertEqual(references.audios, (
+            "https://assets.example/voice", "https://assets.example/reference_audio",
+            "https://assets.example/song",
+        ))
 
-    def test_seedance_payload_contains_only_documented_fields(self) -> None:
-        content = [{"type": "text", "text": "提示词"}]
-        payload = server.seedance_payload(
-            "sd2.5海外版-720p", server.SEEDANCE_MODEL_SPECS["sd2.5海外版-720p"],
-            "16:9", 30, content,
+    def test_each_supported_model_has_its_own_adapter_instance(self) -> None:
+        expected_classes = {
+            "sd2.0海外版-480p": server.Seedance20Overseas480Adapter,
+            "sd2.0海外版-720p": server.Seedance20Overseas720Adapter,
+            "sd2.5海外版-480p": server.Seedance25Overseas480Adapter,
+            "sd2.5海外版-720p": server.Seedance25Overseas720Adapter,
+            "minimax-h3-768p": server.MiniMaxH3768Adapter,
+            "minimax-h3-2k": server.MiniMaxH32KAdapter,
+        }
+        self.assertEqual(set(server.VIDEO_MODEL_ADAPTERS), set(expected_classes))
+        for model, adapter_class in expected_classes.items():
+            self.assertIsInstance(server.VIDEO_MODEL_ADAPTERS[model], adapter_class)
+
+    def test_seedance_25_payload_matches_its_documented_template(self) -> None:
+        adapter = server.video_model_adapter("sd2.5海外版-720p")
+        references = server.ModelReferences(
+            ("https://assets.example/person.png",),
+            ("https://assets.example/reference.mp4",),
+            ("https://assets.example/song.wav",),
         )
-        self.assertEqual(set(payload), {"model", "content", "duration", "ratio", "generate_audio"})
-        self.assertEqual(payload["content"], content)
-        self.assertNotIn("prompt", payload)
-        self.assertNotIn("output_format", payload)
-        self.assertNotIn("resolution", payload)
-        self.assertNotIn("mode", payload)
-
-    def test_minimax_payload_does_not_use_legacy_compatibility_fields(self) -> None:
-        content = [{"type": "text", "text": "提示词"}]
-        payload = server.minimax_payload(
-            "minimax-h3-2k", server.MINIMAX_MODEL_SPECS["minimax-h3-2k"],
-            "9:16", 15, content,
-        )
+        payload = adapter.build_payload("提示词", "16:9", 30, references)
         self.assertEqual(payload, {
-            "model": "minimax-h3-2k", "content": content, "duration": 15, "ratio": "9:16",
+            "model": "sd2.5海外版-720p",
+            "prompt": "提示词",
+            "duration": 30,
+            "ratio": "16:9",
+            "resolution": "720p",
+            "generate_audio": True,
+            "referenceImages": ["https://assets.example/person.png"],
+            "referenceVideos": ["https://assets.example/reference.mp4"],
+            "referenceAudios": ["https://assets.example/song.wav"],
+            "omni_reference_task_type": "reference",
         })
-        for forbidden in ("prompt", "seconds", "metadata", "images", "input_reference",
-                          "referenceImages", "output_format", "resolution", "watermark"):
+        for forbidden in ("content", "output_format", "mode", "seconds", "aspect_ratio"):
             self.assertNotIn(forbidden, payload)
+
+    def test_minimax_payload_uses_its_own_template(self) -> None:
+        adapter = server.video_model_adapter("minimax-h3-2k")
+        references = server.ModelReferences(
+            ("https://assets.example/person.png",), (), ("https://assets.example/song.wav",),
+        )
+        payload = adapter.build_payload("提示词", "9:16", 15, references)
+        self.assertEqual(payload, {
+            "model": "minimax-h3-2k", "prompt": "提示词", "duration": 15, "ratio": "9:16",
+            "generate_audio": True,
+            "referenceImages": ["https://assets.example/person.png"],
+            "referenceAudios": ["https://assets.example/song.wav"],
+        })
+        for forbidden in ("content", "seconds", "metadata", "images", "input_reference",
+                          "omni_reference_task_type", "output_format", "resolution", "watermark"):
+            self.assertNotIn(forbidden, payload)
+
+    def test_seedance_and_minimax_templates_cannot_leak_into_each_other(self) -> None:
+        empty = server.ModelReferences()
+        seedance = server.video_model_adapter("sd2.0海外版-480p").build_payload("p", "1:1", 5, empty)
+        minimax = server.video_model_adapter("minimax-h3-768p").build_payload("p", "1:1", 4, empty)
+        self.assertEqual(seedance["resolution"], "480p")
+        self.assertNotIn("resolution", minimax)
+        self.assertNotIn("omni_reference_task_type", minimax)
+
+    def test_adapter_unwraps_data_envelope_and_reads_download_url(self) -> None:
+        adapter = server.video_model_adapter("sd2.5海外版-480p")
+        response = {"data": {"id": "task-1", "status": "completed", "progress": "100%",
+                             "download_url": "https://cdn.example/result.mp4"}}
+        self.assertEqual(adapter.task_id(response), "task-1")
+        self.assertEqual(adapter.status(response), ("completed", "100%"))
+        self.assertEqual(adapter.download_url(response), "https://cdn.example/result.mp4")
+
+    def test_duration_limits_are_model_specific(self) -> None:
+        server.video_model_adapter("sd2.5海外版-480p").validate("16:9", 30)
+        with self.assertRaises(ValueError):
+            server.video_model_adapter("sd2.0海外版-480p").validate("16:9", 30)
+        with self.assertRaises(ValueError):
+            server.video_model_adapter("minimax-h3-2k").validate("16:9", 16)
 
     def test_model_aliases_are_strict(self) -> None:
         for model in (*server.SEEDANCE_MODEL_SPECS, *server.MINIMAX_MODEL_SPECS):

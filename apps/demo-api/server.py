@@ -28,7 +28,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import parse_qs, quote, urlparse
 
 from film_corpus import public_corpus_catalog, retrieve_film_corpus
@@ -414,17 +414,191 @@ def upstream_model_name(state: dict[str, Any]) -> str:
     raise ValueError(f"当前视频 API 未配置模型：{model}")
 
 
-SEEDANCE_MODEL_SPECS = {
-    "sd2.0海外版-480p": {"resolution": "480p", "min_duration": 5, "max_duration": 15},
-    "sd2.0海外版-720p": {"resolution": "720p", "min_duration": 5, "max_duration": 15},
-    "sd2.5海外版-480p": {"resolution": "480p", "min_duration": 5, "max_duration": 30},
-    "sd2.5海外版-720p": {"resolution": "720p", "min_duration": 5, "max_duration": 30},
+class ModelReferences(NamedTuple):
+    """已经转换并发布为短时公网链接的同级参考素材。"""
+
+    images: tuple[str, ...] = ()
+    videos: tuple[str, ...] = ()
+    audios: tuple[str, ...] = ()
+
+
+class ModelsNexusVideoAdapter:
+    """模型级适配器；仅鉴权、HTTP 和幂等机制由所有模型共享。"""
+
+    model = ""
+    family = ""
+    resolution = ""
+    min_duration = 1
+    max_duration = 1
+    template_version = "v1"
+    submit_path = "/v1/videos"
+    status_path = "/v1/videos/{id}"
+    allowed_ratios = frozenset({"16:9", "9:16", "1:1"})
+
+    @property
+    def task_namespace(self) -> str:
+        safe_model = re.sub(r"[^0-9A-Za-z._-]+", "-", self.model).strip("-").lower()
+        return f"{safe_model}-{self.template_version}"
+
+    def validate(self, ratio: str, duration: int) -> None:
+        if ratio not in self.allowed_ratios:
+            raise ValueError(f"{self.model} 不支持画幅 {ratio}")
+        if duration < self.min_duration or duration > self.max_duration:
+            raise ValueError(
+                f"{self.model} 官方时长范围是 {self.min_duration}–{self.max_duration} 秒，当前请求 {duration} 秒"
+            )
+
+    def build_payload(self, prompt: str, ratio: str, duration: int,
+                      references: ModelReferences) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def unwrap_response(self, response: dict[str, Any]) -> dict[str, Any]:
+        data = response.get("data")
+        return data if isinstance(data, dict) else response
+
+    def task_id(self, response: dict[str, Any]) -> str:
+        body = self.unwrap_response(response)
+        return str(body.get("id") or body.get("task_id") or "")
+
+    def status(self, response: dict[str, Any]) -> tuple[str, Any]:
+        body = self.unwrap_response(response)
+        return str(body.get("status", "")).lower(), body.get("progress")
+
+    def error_message(self, response: dict[str, Any]) -> str:
+        body = self.unwrap_response(response)
+        return str(body.get("error") or body.get("message") or body.get("status") or "未知错误")
+
+    def download_url(self, response: dict[str, Any]) -> str:
+        body = self.unwrap_response(response)
+        content = body.get("content") if isinstance(body.get("content"), dict) else {}
+        output = body.get("output") if isinstance(body.get("output"), dict) else {}
+        return str(
+            body.get("download_url") or body.get("url") or content.get("video_url") or
+            content.get("url") or output.get("video_url") or output.get("url") or ""
+        )
+
+    def status_url(self, upstream_id: str) -> str:
+        return f"{MODELSNEXUS_BASE}{self.status_path.format(id=quote(upstream_id))}"
+
+
+class SeedanceOverseasAdapter(ModelsNexusVideoAdapter):
+    family = "seedance"
+    template_version = "seedance-overseas-v2"
+
+    def build_payload(self, prompt: str, ratio: str, duration: int,
+                      references: ModelReferences) -> dict[str, Any]:
+        # ModelsNexus 模型广场的 Seedance 海外版模板使用顶层 prompt 与三组参考数组；
+        # 不能混入 MiniMax/content/兼容别名字段。
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "prompt": prompt,
+            "duration": duration,
+            "ratio": ratio,
+            "resolution": self.resolution,
+            "generate_audio": True,
+        }
+        if references.images:
+            payload["referenceImages"] = list(references.images)
+        if references.videos:
+            payload["referenceVideos"] = list(references.videos)
+        if references.audios:
+            payload["referenceAudios"] = list(references.audios)
+        if references.images or references.videos or references.audios:
+            payload["omni_reference_task_type"] = "reference"
+        return payload
+
+
+class Seedance20Overseas480Adapter(SeedanceOverseasAdapter):
+    model = "sd2.0海外版-480p"
+    resolution = "480p"
+    min_duration = 5
+    max_duration = 15
+
+
+class Seedance20Overseas720Adapter(SeedanceOverseasAdapter):
+    model = "sd2.0海外版-720p"
+    resolution = "720p"
+    min_duration = 5
+    max_duration = 15
+
+
+class Seedance25Overseas480Adapter(SeedanceOverseasAdapter):
+    model = "sd2.5海外版-480p"
+    resolution = "480p"
+    min_duration = 5
+    max_duration = 30
+
+
+class Seedance25Overseas720Adapter(SeedanceOverseasAdapter):
+    model = "sd2.5海外版-720p"
+    resolution = "720p"
+    min_duration = 5
+    max_duration = 30
+
+
+class MiniMaxH3Adapter(ModelsNexusVideoAdapter):
+    family = "minimax"
+    template_version = "minimax-h3-v2"
+    min_duration = 4
+    max_duration = 15
+
+    def build_payload(self, prompt: str, ratio: str, duration: int,
+                      references: ModelReferences) -> dict[str, Any]:
+        # MiniMax H3 的模型广场模板固定清晰度在模型 ID 中，不接收 resolution；
+        # 它单独使用 prompt + reference* 数组，不复用 Seedance 的 reference mode。
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "prompt": prompt,
+            "duration": duration,
+            "ratio": ratio,
+            "generate_audio": True,
+        }
+        if references.images:
+            payload["referenceImages"] = list(references.images[:9])
+        if references.videos:
+            payload["referenceVideos"] = list(references.videos[:3])
+        if references.audios:
+            payload["referenceAudios"] = list(references.audios[:3])
+        return payload
+
+
+class MiniMaxH3768Adapter(MiniMaxH3Adapter):
+    model = "minimax-h3-768p"
+    resolution = "768P"
+
+
+class MiniMaxH32KAdapter(MiniMaxH3Adapter):
+    model = "minimax-h3-2k"
+    resolution = "2K"
+
+
+VIDEO_MODEL_ADAPTERS: dict[str, ModelsNexusVideoAdapter] = {
+    adapter.model: adapter
+    for adapter in (
+        Seedance20Overseas480Adapter(), Seedance20Overseas720Adapter(),
+        Seedance25Overseas480Adapter(), Seedance25Overseas720Adapter(),
+        MiniMaxH3768Adapter(), MiniMaxH32KAdapter(),
+    )
 }
 
-MINIMAX_MODEL_SPECS = {
-    "minimax-h3-768p": {"resolution": "768P", "min_duration": 4, "max_duration": 15},
-    "minimax-h3-2k": {"resolution": "2K", "min_duration": 4, "max_duration": 15},
+# 兼容界面层现有的规格读取；提交请求只允许经过 VIDEO_MODEL_ADAPTERS。
+SEEDANCE_MODEL_SPECS = {
+    model: {"resolution": adapter.resolution, "min_duration": adapter.min_duration,
+            "max_duration": adapter.max_duration}
+    for model, adapter in VIDEO_MODEL_ADAPTERS.items() if adapter.family == "seedance"
 }
+MINIMAX_MODEL_SPECS = {
+    model: {"resolution": adapter.resolution, "min_duration": adapter.min_duration,
+            "max_duration": adapter.max_duration}
+    for model, adapter in VIDEO_MODEL_ADAPTERS.items() if adapter.family == "minimax"
+}
+
+
+def video_model_adapter(model: str) -> ModelsNexusVideoAdapter:
+    try:
+        return VIDEO_MODEL_ADAPTERS[model]
+    except KeyError as exc:
+        raise ValueError(f"当前视频 API 未配置模型：{model}") from exc
 
 
 def build_generation_prompt(state: dict[str, Any]) -> str:
@@ -609,75 +783,57 @@ def create_signed_asset_url(job_id: str, key: str, path: pathlib.Path) -> str:
     return f"{PUBLIC_API_BASE}/assets/{job_id}/{token}"
 
 
-def build_models_nexus_content(job_id: str, directory: pathlib.Path, files: dict[str, str],
-                               prompt: str, include_song: bool = True) -> list[dict[str, Any]]:
-    """按 ModelsNexus 多模态内容结构组装全部同级参考素材。"""
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+def build_model_references(job_id: str, directory: pathlib.Path, files: dict[str, str],
+                           include_song: bool = True) -> ModelReferences:
+    """只负责生成短时 URL；具体字段名和数量限制由模型适配器决定。"""
+    images: list[str] = []
+    videos: list[str] = []
+    audios: list[str] = []
     portrait_keys = sorted(
         (key for key in files if key.startswith("portrait")),
         key=lambda key: (0 if key == "portrait" else int(key.rsplit("_", 1)[-1])),
     )[:8]
     for key in portrait_keys:
-        uri = create_signed_asset_url(job_id, key, directory / files[key])
-        content.append({"type": "image_url", "image_url": {"url": uri}, "role": "reference_image"})
+        images.append(create_signed_asset_url(job_id, key, directory / files[key]))
     if "reference" in files:
-        uri = create_signed_asset_url(job_id, "reference", directory / files["reference"])
-        content.append({"type": "video_url", "video_url": {"url": uri}, "role": "reference_video"})
+        videos.append(create_signed_asset_url(job_id, "reference", directory / files["reference"]))
     audio_keys = [key for key in ("voice", "reference_audio", "song") if key in files]
     if not include_song:
         audio_keys = [key for key in audio_keys if key != "song"]
     for key in audio_keys[:3]:
-        uri = create_signed_asset_url(job_id, key, directory / files[key])
-        content.append({"type": "audio_url", "audio_url": {"url": uri}, "role": "reference_audio"})
-    return content
-
-
-def seedance_payload(model: str, spec: dict[str, Any], ratio: str, duration: int,
-                     content: list[dict[str, Any]]) -> dict[str, Any]:
-    # ModelsNexus 的 OpenAI Video 兼容层直接接收 content。模型 ID 已固定清晰度，
-    # 不能再发送 prompt/output_format/resolution，否则会被严格参数校验拒绝。
-    return {
-        "model": model,
-        "content": content,
-        "duration": duration,
-        "ratio": ratio,
-        "generate_audio": True,
-    }
-
-
-def minimax_payload(model: str, spec: dict[str, Any], ratio: str, duration: int,
-                    content: list[dict[str, Any]]) -> dict[str, Any]:
-    """MiniMax H3 原生多模态结构经 ModelsNexus `/v1/videos` 转发。"""
-    # minimax-h3-768p / minimax-h3-2k 已在模型 ID 中区分输出档位；
-    # 不再添加兼容端点不认识的 prompt、metadata、images 或 input_reference。
-    return {
-        "model": model,
-        "content": content,
-        "duration": duration,
-        "ratio": ratio,
-    }
+        audios.append(create_signed_asset_url(job_id, key, directory / files[key]))
+    return ModelReferences(tuple(images), tuple(videos), tuple(audios))
 
 
 def submit_video_task(job_id: str, task_key: str, payload: dict[str, Any], api_key: str,
-                      protocol: str = "openai_video") -> str:
+                      adapter: ModelsNexusVideoAdapter) -> str:
     state = read_state(job_id)
     tasks = state.get("upstream_tasks") if isinstance(state.get("upstream_tasks"), dict) else {}
     current = tasks.get(task_key) if isinstance(tasks, dict) else None
+    payload_fingerprint = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     if isinstance(current, dict) and current.get("id"):
+        if current.get("adapter") != adapter.task_namespace or current.get("payload_sha256") != payload_fingerprint:
+            raise RuntimeError(f"上游任务 {task_key} 已由不同模型模板提交；禁止覆盖或重复扣费")
         return str(current["id"])
     if isinstance(current, dict) and current.get("submission_state") == "submitting":
         # 收到 HTTP 4xx 代表上一次请求已被网关明确拒绝，没有创建付费任务，可以安全重试。
         rejected = state.get("status") == "failed" and "HTTP 4" in str(state.get("error", ""))
         if not rejected:
             raise RuntimeError(f"上游任务 {task_key} 提交结果未知；为避免重复扣费，系统不会再次提交")
-    tasks[task_key] = {"submission_state": "submitting", "model": payload["model"], "protocol": protocol}
+    tasks[task_key] = {
+        "submission_state": "submitting", "model": payload["model"],
+        "adapter": adapter.task_namespace, "payload_sha256": payload_fingerprint,
+    }
     write_state(job_id, upstream_tasks=tasks, stage=f"正在提交唯一生成任务 · {task_key}")
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    submit_path = "/doubao/api/v3/contents/generations/tasks" if protocol == "doubao_native" else "/v1/videos"
     request = urllib.request.Request(
-        f"{MODELSNEXUS_BASE}{submit_path}",
+        f"{MODELSNEXUS_BASE}{adapter.submit_path}",
         data=body,
-        headers=modelsnexus_headers(api_key, "application/json", f"yingliu-{job_id}-{task_key}"),
+        headers=modelsnexus_headers(
+            api_key, "application/json", f"yingliu-{job_id}-{task_key}-{adapter.template_version}"
+        ),
         method="POST",
     )
     try:
@@ -687,30 +843,29 @@ def submit_video_task(job_id: str, task_key: str, payload: dict[str, Any], api_k
         tasks[task_key].update({"submission_state": "rejected", "error": str(exc)[:1200]})
         write_state(job_id, upstream_tasks=tasks)
         raise
-    upstream_id = str(response.get("id") or response.get("task_id") or "")
+    upstream_id = adapter.task_id(response)
     if not upstream_id:
         raise RuntimeError(f"上游未返回任务 ID：{json.dumps(response, ensure_ascii=False)[:800]}")
     tasks[task_key] = {
-        "submission_state": "submitted", "model": payload["model"], "protocol": protocol, "id": upstream_id,
-        "status": str(response.get("status", "queued")),
+        "submission_state": "submitted", "model": payload["model"], "adapter": adapter.task_namespace,
+        "payload_sha256": payload_fingerprint, "id": upstream_id,
+        "status": adapter.status(response)[0] or "queued",
     }
     write_state(job_id, upstream_tasks=tasks)
     return upstream_id
 
 
 def wait_and_download_video(job_id: str, task_key: str, upstream_id: str, api_key: str, output: pathlib.Path,
-                            base_progress: int, progress_span: int, protocol: str = "openai_video") -> None:
+                            base_progress: int, progress_span: int, adapter: ModelsNexusVideoAdapter) -> None:
     final_response: dict[str, Any] = {}
     while True:
-        query_path = (f"/doubao/api/v3/contents/generations/tasks/{quote(upstream_id)}"
-                      if protocol == "doubao_native" else f"/v1/videos/{quote(upstream_id)}")
         request = urllib.request.Request(
-            f"{MODELSNEXUS_BASE}{query_path}", headers=modelsnexus_headers(api_key),
+            adapter.status_url(upstream_id), headers=modelsnexus_headers(api_key),
         )
         response = api_json(request, timeout=60)
-        status = str(response.get("status", "")).lower()
+        status, raw_progress = adapter.status(response)
         default_progress = 10 if status in {"pending", "queued"} else 50 if status in {"processing", "running"} else 100
-        raw_progress = response.get("progress", default_progress)
+        raw_progress = default_progress if raw_progress is None else raw_progress
         if isinstance(raw_progress, str):
             raw_progress = raw_progress.rstrip("%")
         try:
@@ -727,27 +882,13 @@ def wait_and_download_video(job_id: str, task_key: str, upstream_id: str, api_ke
             final_response = response
             break
         if status in {"failed", "cancelled", "canceled", "error"}:
-            raise RuntimeError(f"上游视频生成失败：{response.get('error') or response.get('message') or status}")
+            raise RuntimeError(f"上游视频生成失败：{adapter.error_message(response)}")
         time.sleep(5)
-    content = final_response.get("content") if isinstance(final_response.get("content"), dict) else {}
-    metadata = final_response.get("metadata") if isinstance(final_response.get("metadata"), dict) else {}
-    output_data = final_response.get("output") if isinstance(final_response.get("output"), dict) else {}
-    video_url = str(
-        content.get("video_url") or content.get("url") or metadata.get("url") or
-        output_data.get("video_url") or output_data.get("url") or final_response.get("url") or ""
-    )
-    if protocol == "doubao_native" and video_url:
-        request = urllib.request.Request(video_url, headers={"User-Agent": "YingliuDemo/3.0"})
-    elif protocol == "doubao_native":
-        request = urllib.request.Request(
-            f"{MODELSNEXUS_BASE}/v1/tasks/{quote(upstream_id)}/artifacts/video/content",
-            headers=modelsnexus_headers(api_key),
-        )
-    else:
-        request = urllib.request.Request(
-            f"{MODELSNEXUS_BASE}/v1/videos/{quote(upstream_id)}/content",
-            headers=modelsnexus_headers(api_key),
-        )
+    video_url = adapter.download_url(final_response)
+    if not video_url:
+        raise RuntimeError(f"{adapter.model} 已完成，但响应未返回官方 download_url；保留任务 ID，禁止重新生成")
+    # ModelsNexus 文档要求 download_url 不携带平台 Authorization，避免把密钥发给对象存储。
+    request = urllib.request.Request(video_url, headers={"User-Agent": "YingliuDemo/3.0"})
     with urllib.request.urlopen(request, timeout=600) as response, output.open("wb") as handle:
         shutil.copyfileobj(response, handle, length=1024 * 1024)
     if output.stat().st_size < 1024:
@@ -794,11 +935,11 @@ def generate_upstream_job(job_id: str) -> None:
 
     try:
         model = upstream_model_name(state)
-        spec = SEEDANCE_MODEL_SPECS.get(model) or MINIMAX_MODEL_SPECS[model]
+        adapter = video_model_adapter(model)
         if audio is not None:
             duration = probe_duration(audio, limit=None)
         else:
-            duration = float(state.get("planned_duration") or spec["max_duration"])
+            duration = float(state.get("planned_duration") or adapter.max_duration)
             plan = state.get("generation_plan")
             shots = plan.get("shots") if isinstance(plan, dict) else None
             ends: list[float] = []
@@ -810,53 +951,53 @@ def generate_upstream_job(job_id: str) -> None:
             if ends:
                 duration = max(ends)
         ratio = str(state.get("ratio", "16:9"))
-        if ratio not in {"16:9", "9:16", "1:1"}:
-            raise ValueError(f"{model} 不支持画幅 {ratio}")
         prompt = build_generation_prompt(state)
         if not prompt:
             raise ValueError("缺少 Agent 生成提示词")
         write_state(job_id, status="processing", stage="准备 ModelsNexus 固定参数", progress=12,
                     upstream_model=model, submission_state="preparing")
 
-        if model in SEEDANCE_MODEL_SPECS:
+        if adapter.family == "seedance":
             if not MODELSNEXUS_API_KEY:
                 raise RuntimeError("ModelsNexus Seedance API 未配置")
-            spec = SEEDANCE_MODEL_SPECS[model]
             requested_duration = round(duration)
-            if requested_duration < spec["min_duration"] or requested_duration > spec["max_duration"]:
-                raise ValueError(f"{model} 官方时长范围是 {spec['min_duration']}–{spec['max_duration']} 秒，当前音频 {duration:.2f} 秒")
+            adapter.validate(ratio, requested_duration)
             write_state(job_id, stage="正在创建 ModelsNexus 可拉取的短时素材链接", progress=16)
-            content = build_models_nexus_content(job_id, directory, files, prompt)
-            payload = seedance_payload(model, spec, ratio, requested_duration, content)
-            upstream_id = submit_video_task(job_id, "seedance", payload, MODELSNEXUS_API_KEY)
+            references = build_model_references(job_id, directory, files)
+            payload = adapter.build_payload(prompt, ratio, requested_duration, references)
+            task_key = f"{adapter.task_namespace}-main"
+            upstream_id = submit_video_task(job_id, task_key, payload, MODELSNEXUS_API_KEY, adapter)
             upstream_output = directory / "upstream.mp4"
             wait_and_download_video(
-                job_id, "seedance", upstream_id, MODELSNEXUS_API_KEY, upstream_output, 22, 70,
+                job_id, task_key, upstream_id, MODELSNEXUS_API_KEY, upstream_output, 22, 70, adapter,
             )
             # Seedance 保持模型原始输出，服务器不做 FFmpeg 二次渲染或换音轨。
             upstream_output.replace(output)
         else:
             if not MINIMAX_API_KEY:
                 raise RuntimeError("ModelsNexus MiniMax API 未配置")
-            spec = MINIMAX_MODEL_SPECS[model]
-            requested_total = max(spec["min_duration"], round(duration))
-            segment_count = max(1, math.ceil(requested_total / spec["max_duration"]))
+            requested_total = max(adapter.min_duration, round(duration))
+            segment_count = max(1, math.ceil(requested_total / adapter.max_duration))
             base = requested_total // segment_count
             remainder = requested_total % segment_count
             durations = [base + (1 if index < remainder else 0) for index in range(segment_count)]
-            if any(value < spec["min_duration"] or value > spec["max_duration"] for value in durations):
-                raise ValueError(f"无法按 MiniMax 官方 {spec['min_duration']}–{spec['max_duration']} 秒范围拆分当前音频")
+            if any(value < adapter.min_duration or value > adapter.max_duration for value in durations):
+                raise ValueError(
+                    f"无法按 MiniMax 官方 {adapter.min_duration}–{adapter.max_duration} 秒范围拆分当前音频"
+                )
             clips: list[pathlib.Path] = []
             cursor = 0.0
             for index, segment_duration in enumerate(durations):
-                task_key = f"minimax-{index + 1:02d}"
+                adapter.validate(ratio, segment_duration)
+                task_key = f"{adapter.task_namespace}-{index + 1:02d}"
                 segment_prompt = prompt_for_window(state, cursor, min(duration, cursor + segment_duration))
-                content = build_models_nexus_content(job_id, directory, files, segment_prompt)
-                payload = minimax_payload(model, spec, ratio, segment_duration, content)
-                upstream_id = submit_video_task(job_id, task_key, payload, MINIMAX_API_KEY)
+                references = build_model_references(job_id, directory, files)
+                payload = adapter.build_payload(segment_prompt, ratio, segment_duration, references)
+                upstream_id = submit_video_task(job_id, task_key, payload, MINIMAX_API_KEY, adapter)
                 clip = directory / f"upstream-{index + 1:02d}.mp4"
                 wait_and_download_video(job_id, task_key, upstream_id, MINIMAX_API_KEY, clip,
-                                        18 + round(index * 70 / segment_count), max(1, round(70 / segment_count)))
+                                        18 + round(index * 70 / segment_count),
+                                        max(1, round(70 / segment_count)), adapter)
                 clips.append(clip)
                 cursor += segment_duration
             write_state(job_id, stage="MiniMax 分段合成与原始音轨封装", progress=94)
