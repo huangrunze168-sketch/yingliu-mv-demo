@@ -588,29 +588,40 @@ def create_signed_asset_url(job_id: str, key: str, path: pathlib.Path) -> str:
     return f"{PUBLIC_API_BASE}/assets/{job_id}/{token}"
 
 
-def submit_video_task(job_id: str, task_key: str, payload: dict[str, Any], api_key: str) -> str:
+def submit_video_task(job_id: str, task_key: str, payload: dict[str, Any], api_key: str,
+                      protocol: str = "openai_video") -> str:
     state = read_state(job_id)
     tasks = state.get("upstream_tasks") if isinstance(state.get("upstream_tasks"), dict) else {}
     current = tasks.get(task_key) if isinstance(tasks, dict) else None
     if isinstance(current, dict) and current.get("id"):
         return str(current["id"])
     if isinstance(current, dict) and current.get("submission_state") == "submitting":
-        raise RuntimeError(f"上游任务 {task_key} 提交结果未知；为避免重复扣费，系统不会再次提交")
-    tasks[task_key] = {"submission_state": "submitting", "model": payload["model"]}
+        # 收到 HTTP 4xx 代表上一次请求已被网关明确拒绝，没有创建付费任务，可以安全重试。
+        rejected = state.get("status") == "failed" and "HTTP 4" in str(state.get("error", ""))
+        if not rejected:
+            raise RuntimeError(f"上游任务 {task_key} 提交结果未知；为避免重复扣费，系统不会再次提交")
+    tasks[task_key] = {"submission_state": "submitting", "model": payload["model"], "protocol": protocol}
     write_state(job_id, upstream_tasks=tasks, stage=f"正在提交唯一生成任务 · {task_key}")
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    submit_path = "/doubao/api/v3/contents/generations/tasks" if protocol == "doubao_native" else "/v1/videos"
     request = urllib.request.Request(
-        f"{MODELSNEXUS_BASE}/v1/videos",
+        f"{MODELSNEXUS_BASE}{submit_path}",
         data=body,
         headers=modelsnexus_headers(api_key, "application/json", f"yingliu-{job_id}-{task_key}"),
         method="POST",
     )
-    response = api_json(request, timeout=180)
+    try:
+        response = api_json(request, timeout=180)
+    except RuntimeError as exc:
+        # api_json 的 RuntimeError 只对应已收到的 HTTP 错误响应，因此确定没有未知的在途任务。
+        tasks[task_key].update({"submission_state": "rejected", "error": str(exc)[:1200]})
+        write_state(job_id, upstream_tasks=tasks)
+        raise
     upstream_id = str(response.get("id") or response.get("task_id") or "")
     if not upstream_id:
         raise RuntimeError(f"上游未返回任务 ID：{json.dumps(response, ensure_ascii=False)[:800]}")
     tasks[task_key] = {
-        "submission_state": "submitted", "model": payload["model"], "id": upstream_id,
+        "submission_state": "submitted", "model": payload["model"], "protocol": protocol, "id": upstream_id,
         "status": str(response.get("status", "queued")),
     }
     write_state(job_id, upstream_tasks=tasks)
@@ -618,14 +629,21 @@ def submit_video_task(job_id: str, task_key: str, payload: dict[str, Any], api_k
 
 
 def wait_and_download_video(job_id: str, task_key: str, upstream_id: str, api_key: str, output: pathlib.Path,
-                            base_progress: int, progress_span: int) -> None:
+                            base_progress: int, progress_span: int, protocol: str = "openai_video") -> None:
+    final_response: dict[str, Any] = {}
     while True:
+        query_path = (f"/doubao/api/v3/contents/generations/tasks/{quote(upstream_id)}"
+                      if protocol == "doubao_native" else f"/v1/videos/{quote(upstream_id)}")
         request = urllib.request.Request(
-            f"{MODELSNEXUS_BASE}/v1/videos/{quote(upstream_id)}", headers=modelsnexus_headers(api_key),
+            f"{MODELSNEXUS_BASE}{query_path}", headers=modelsnexus_headers(api_key),
         )
         response = api_json(request, timeout=60)
         status = str(response.get("status", "")).lower()
-        upstream_progress = int(float(response.get("progress", 0) or 0))
+        default_progress = 10 if status in {"pending", "queued"} else 50 if status in {"processing", "running"} else 100
+        raw_progress = response.get("progress", default_progress)
+        if isinstance(raw_progress, str):
+            raw_progress = raw_progress.rstrip("%")
+        upstream_progress = int(float(raw_progress or default_progress))
         state = read_state(job_id)
         tasks = state.get("upstream_tasks") if isinstance(state.get("upstream_tasks"), dict) else {}
         if isinstance(tasks.get(task_key), dict):
@@ -633,13 +651,25 @@ def wait_and_download_video(job_id: str, task_key: str, upstream_id: str, api_ke
         write_state(job_id, upstream_tasks=tasks, stage=f"ModelsNexus 生成中 · {task_key} · {upstream_progress}%",
                     progress=min(94, base_progress + round(upstream_progress * progress_span / 100)))
         if status in {"completed", "succeeded", "success"}:
+            final_response = response
             break
         if status in {"failed", "cancelled", "canceled", "error"}:
             raise RuntimeError(f"上游视频生成失败：{response.get('error') or response.get('message') or status}")
         time.sleep(5)
-    request = urllib.request.Request(
-        f"{MODELSNEXUS_BASE}/v1/videos/{quote(upstream_id)}/content", headers=modelsnexus_headers(api_key),
-    )
+    content = final_response.get("content") if isinstance(final_response.get("content"), dict) else {}
+    video_url = str(content.get("video_url") or "")
+    if protocol == "doubao_native" and video_url:
+        request = urllib.request.Request(video_url, headers={"User-Agent": "YingliuDemo/3.0"})
+    elif protocol == "doubao_native":
+        request = urllib.request.Request(
+            f"{MODELSNEXUS_BASE}/v1/tasks/{quote(upstream_id)}/artifacts/video/content",
+            headers=modelsnexus_headers(api_key),
+        )
+    else:
+        request = urllib.request.Request(
+            f"{MODELSNEXUS_BASE}/v1/videos/{quote(upstream_id)}/content",
+            headers=modelsnexus_headers(api_key),
+        )
     with urllib.request.urlopen(request, timeout=600) as response, output.open("wb") as handle:
         shutil.copyfileobj(response, handle, length=1024 * 1024)
     if output.stat().st_size < 1024:
@@ -743,9 +773,14 @@ def generate_upstream_job(job_id: str) -> None:
                 "generate_audio": True,
                 "omni_reference_task_type": "reference",
             }
-            upstream_id = submit_video_task(job_id, "seedance", payload, MODELSNEXUS_API_KEY)
+            upstream_id = submit_video_task(
+                job_id, "seedance", payload, MODELSNEXUS_API_KEY, protocol="doubao_native",
+            )
             upstream_output = directory / "upstream.mp4"
-            wait_and_download_video(job_id, "seedance", upstream_id, MODELSNEXUS_API_KEY, upstream_output, 22, 70)
+            wait_and_download_video(
+                job_id, "seedance", upstream_id, MODELSNEXUS_API_KEY, upstream_output, 22, 70,
+                protocol="doubao_native",
+            )
             # Seedance 保持模型原始输出，服务器不做 FFmpeg 二次渲染或换音轨。
             upstream_output.replace(output)
         else:
