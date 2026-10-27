@@ -1,0 +1,64 @@
+/* 首屏只为对话激活态补充控件；空态的输入台和入场视觉保持不变。 */
+.agent-thread .hero-agent-tools { display: flex; align-items: center; gap: 12px; color: #c8c9d3; font-size: 12px; }
+.agent-thread .hero-agent-tools button, .hero-agent-error button, .hero-agent-confirm button {
+  border: 1px solid #ffffff28; border-radius: 999px; padding: 6px 12px;
+  color: #f3f3f8; background: #ffffff12; cursor: pointer; font-size: 12px;
+}
+.agent-thread .hero-agent-tools button:first-of-type { margin-left: auto; }
+.agent-thread .hero-agent-tools button:hover, .hero-agent-error button:hover, .hero-agent-confirm button:hover { background: #ffffff27; }
+.agent-thread .hero-agent-tools button:disabled, .hero-agent-confirm button:disabled { opacity: .5; cursor: not-allowed; }
+.agent-thread .agent-msg-body p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-thread .agent-canvas-link { display:inline-flex; align-items:center; border:1px solid #75ddec55; border-radius:999px; padding:4px 9px; color:#8ce9f7; background:#143138; font-size:12px; font-weight:650; text-decoration:none; }
+.agent-thread .agent-canvas-link:hover { border-color:#8ce9f7aa; background:#1b4149; }
+.agent-message-skill { display:inline-flex; align-items:center; margin-bottom:7px; border:1px solid #54d8ef55; border-radius:999px; padding:4px 8px; color:#7fe5f6; background:#16343a; font-size:11px; }
+.agent-thread .hero-agent-state { margin: 0; color: #b9bed2; font-size: 12px; }
+.agent-thread .hero-agent-error { display: flex; align-items: center; gap: 12px; color: #ffb6bc; font-size: 12px; line-height: 1.5; }
+.agent-thread .hero-agent-error > span { flex: 1; }
+.agent-thread .hero-agent-error-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.agent-thread .hero-agent-activity { color: #b9bed2; font-size: 12px; }
+.agent-thread .hero-agent-activity summary { cursor: pointer; }
+.agent-thread .hero-agent-activity ul { margin: 8px 0 0; padding-left: 20px; line-height: 1.7; }
+.hero-creative-plan { display: grid; gap: 12px; padding: 16px; border: 1px solid #ffffff2a; border-radius: 18px; background: #181820e6; color: #f0f0f5; text-align: left; }
+.hero-creative-plan header { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 14px; font-weight: 650; }
+.hero-creative-card-actions { display: flex; align-items: center; gap: 7px; }
+.hero-creative-card-actions button { width: 24px; height: 24px; padding: 0; border: 1px solid #ffffff2e; border-radius: 7px; color: #d5d6e1; background: #ffffff0d; cursor: pointer; font: inherit; line-height: 1; }
+.hero-creative-card-actions button:hover { border-color: #a8aeff; color: #fff; background: #ffffff18; }
+.hero-creative-plan header small, .hero-creative-hint { color: #adb0bd; font-size: 12px; line-height: 1.6; }
+.hero-creative-plan label { display: grid; gap: 6px; color: #bfc0cd; font-size: 12px; }
+.hero-creative-plan :is(input, textarea, select) { box-sizing: border-box; width: 100%; padding: 9px 10px; border: 1px solid #ffffff32; border-radius: 9px; outline: none; background: #ffffff0b; color: #f3f3f7; font: inherit; }
+.hero-creative-plan textarea { min-height: 60px; resize: vertical; }
+.hero-creative-plan select option { background: #24242c; }
+.hero-creative-plan :is(input, textarea, select):focus-visible { border-color: #a8aeff; }
+.hero-creative-plan :is(input, textarea, select):disabled { opacity: .65; }
+.hero-creative-shots { display: grid; gap: 12px; max-height: 250px; overflow-y: auto; }
+.hero-creative-shots fieldset { display: grid; gap: 9px; margin: 0; padding: 12px; border: 1px solid #ffffff22; border-radius: 12px; }
+.hero-creative-shots legend { padding-inline: 5px; color: #dedee8; font-size: 12px; }
+.hero-creative-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.hero-creative-actions button { border: 1px solid #ffffff44; border-radius: 9px; padding: 9px 14px; background: #ffffff16; color: #fff; cursor: pointer; }
+.hero-creative-actions button:last-child { background: #f3f3f7; color: #15151b; }
+.hero-creative-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.hero-creative-hint { margin: 0; }
+.hero-generation { display: grid; gap: 12px; padding: 16px; border: 1px solid #7288ff55; border-radius: 18px; background: #171b2be8; color: #eff0f7; text-align: left; font-size: 12px; }
+.hero-generation header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.hero-generation header strong { font-size: 14px; }
+.hero-generation header span { color: #a9baff; }
+.hero-generation p { margin: 0; line-height: 1.6; }
+.hero-generation-config { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }
+.hero-generation-config label { display: grid; gap: 5px; color: #c4c8d6; }
+.hero-generation-config :is(input:not([type=checkbox]), select) { box-sizing: border-box; width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid #ffffff33; border-radius: 9px; background: #ffffff0d; color: #fff; font: inherit; }
+.hero-generation-config option { background: #252633; }
+.hero-generation-config .hero-generation-check { display: flex; align-items: flex-start; gap: 8px; grid-column: 1 / -1; line-height: 1.5; }
+.hero-generation-check input { margin-top: 2px; accent-color: #a2acff; }
+.hero-generation-start, .hero-generation-assets button { border: 1px solid #ffffff40; border-radius: 9px; padding: 9px 12px; color: #161724; background: #f0f0fa; cursor: pointer; font: inherit; }
+.hero-generation-start:disabled, .hero-generation-assets button:disabled { opacity: .45; cursor: not-allowed; }
+.hero-generation-assets { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.hero-generation-assets figure { display: grid; gap: 7px; margin: 0; padding: 8px; border: 1px solid #ffffff26; border-radius: 12px; }
+.hero-generation-assets img, .hero-generation-assets video { width: 100%; aspect-ratio: 16 / 10; object-fit: contain; border-radius: 8px; background: #0e101a; }
+.hero-generation-assets figcaption { color: #c6c9d6; }
+@media (max-width: 650px) { .hero-generation-config { grid-template-columns: 1fr; } }
+.hero-agent-confirm {
+  width: min(760px, 100%); padding: 14px 16px; border: 1px solid #ffffff36;
+  border-radius: 14px; background: #15141de8; color: #e9e9f1; font-size: 12px;
+}
+.hero-agent-confirm p { margin: 0 0 12px; line-height: 1.6; }
+.hero-agent-confirm button + button { margin-left: 10px; background: #ffffffec; color: #12121a; }

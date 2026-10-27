@@ -1,0 +1,18 @@
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #root { min-height: 100%; }
+/* 基底只依赖全局 :root token（marketing 家族）：workbench-scope 作用域 token
+   在 / 与 /signup 上不解析，曾导致 body 背景透明、焦点环整体失效。 */
+body { margin: 0; font-family: var(--font-sans); font-size: var(--text-body); line-height: var(--leading-body); color: var(--ink); background: var(--canvas); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+a { color: inherit; text-decoration: none; }
+h1, h2, h3, h4, p { margin: 0; }
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--primary-focus); outline-offset: 2px; border-radius: var(--radius-sm); }
+* { scrollbar-width: thin; scrollbar-color: var(--hairline-strong) transparent; }
+::-webkit-scrollbar { width: var(--space-2); height: var(--space-2); }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--hairline-strong); border: var(--space-1) solid transparent; background-clip: content-box; border-radius: var(--radius-full); }
+/* 薰衣草 hover：滚动条悬停提亮为品牌色弱化档 */
+::-webkit-scrollbar-thumb:hover { background: rgba(130, 143, 255, .45); background-clip: content-box; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; } }

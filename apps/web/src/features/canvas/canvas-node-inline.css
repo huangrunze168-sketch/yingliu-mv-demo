@@ -1,0 +1,48 @@
+/* LibTV 源码对标：500px 生成器外壳、430px 预览和可展开内联 composer。 */
+.qtv-canvas-node.is-generation{border:0;background:transparent;box-shadow:none;overflow:visible}
+.qtv-canvas-node.is-generation:before{display:none}
+.qtv-canvas-node.is-generation:hover,.qtv-canvas-node.is-generation.is-selected{border-color:transparent;box-shadow:none}
+.qtv-canvas-node.is-generation .qtv-node-header{width:430px;margin:0 auto;padding-inline:10px;border:1px solid #3d3d3d;border-bottom:0;border-radius:14px 14px 0 0;background:#242424}
+.qtv-canvas-node.is-generation.is-selected .qtv-node-header,.qtv-canvas-node.is-generation.is-selected .qtv-node-stage,.qtv-canvas-node.is-generation.is-selected .qtv-inline-composer{border-color:var(--node-accent);box-shadow:0 0 0 1px color-mix(in srgb,var(--node-accent) 18%,transparent),0 15px 38px rgba(0,0,0,.32)}
+.qtv-canvas-node.is-generation .qtv-node-stage{width:430px;height:242px;margin:0 auto;padding:0;border-radius:0 0 14px 14px;cursor:pointer;outline:0;color:inherit;font:inherit;text-align:left;-webkit-tap-highlight-color:transparent}
+.qtv-canvas-node.is-generation .qtv-node-stage:focus-visible{box-shadow:0 0 0 2px var(--node-accent)}
+.qtv-canvas-node.is-generation .react-flow__handle{top:169px}
+.qtv-preview-toggle{position:absolute;z-index:4;right:9px;top:9px;display:grid;width:25px;height:25px;place-items:center;border:1px solid rgba(255,255,255,.1);border-radius:7px;color:#999;background:rgba(22,22,22,.72);backdrop-filter:blur(7px)}
+.qtv-canvas-node.is-expanded .qtv-preview-toggle svg{transform:rotate(180deg)}
+.qtv-node-progress{position:relative;z-index:3;width:430px;height:3px;margin:0 auto;overflow:hidden;background:#293038}
+.qtv-node-progress>span{display:block;height:100%;min-width:2px;background:var(--node-accent)}
+.qtv-node-progress.is-determinate>span{transition:width .32s ease-out}
+.qtv-node-progress.is-indeterminate>span{position:absolute;left:-32%;width:32%;background:linear-gradient(90deg,transparent,var(--node-accent),#d9f7ff,transparent);animation:qtv-progress-scan 1.3s ease-in-out infinite}
+@keyframes qtv-progress-scan{to{left:100%}}
+.qtv-inline-composer{position:relative;z-index:2;width:500px;min-height:186px;margin-top:8px;padding:11px;border:1px solid #3d3d3d;border-radius:14px;background:#242424;box-shadow:0 14px 34px rgba(0,0,0,.28)}
+.qtv-inline-composer>textarea{display:block;width:100%;height:102px;min-height:102px;max-height:162px;resize:vertical;padding:10px 11px;border:1px solid #383838;border-radius:9px;outline:0;color:#ededed;background:#1c1c1c;font-size:12px;line-height:1.55}
+.qtv-inline-composer>textarea:focus{border-color:var(--node-accent);box-shadow:0 0 0 1px color-mix(in srgb,var(--node-accent) 24%,transparent)}
+.qtv-inline-composer>textarea:disabled{cursor:not-allowed;opacity:.48}
+.qtv-reference-feedback{margin:0 0 8px;padding:7px 9px;border:1px solid rgba(246,178,97,.35);border-radius:8px;color:#ffd4a5;background:rgba(150,90,30,.12);font-size:11px;line-height:1.45}
+.qtv-node-references{display:flex;gap:6px;margin-bottom:8px;overflow-x:auto;scrollbar-width:thin}
+.qtv-node-reference{position:relative;width:104px;height:46px;flex:0 0 104px;display:flex;align-items:center;padding:5px 21px 5px 7px;border:1px solid #3b3b3b;border-radius:8px;background:#1d1d1d}
+.qtv-node-reference>span{min-width:0;display:grid;grid-template-columns:15px minmax(0,1fr);align-items:center;column-gap:4px}
+.qtv-node-reference svg{grid-row:1/3;color:var(--node-accent)}
+.qtv-node-reference b,.qtv-node-reference small{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qtv-node-reference b{color:#d6d6d6;font-size:9px}.qtv-node-reference small{color:#707070;font-size:7px}
+.qtv-node-reference>button{position:absolute;right:3px;top:3px;width:17px;height:17px;padding:0;border:0;border-radius:50%;color:#8a8a8a;background:#2d2d2d;font-size:12px;line-height:1}.qtv-node-reference>button:hover{color:#fff;background:#493035}
+.qtv-reference-empty{height:27px;display:flex;align-items:center;gap:6px;margin-bottom:8px;padding:0 7px;border:1px dashed #393939;border-radius:8px;color:#737373;font-size:8px}
+.qtv-inline-controls{display:grid;grid-template-columns:minmax(0,1fr) auto 34px;align-items:center;gap:5px;margin-top:8px}
+.qtv-inline-controls .qtv-model-chip{justify-self:start}
+.qtv-model-select{display:flex;min-width:0;align-items:center;gap:4px;color:var(--node-accent)}.qtv-model-select select{width:100%;max-width:210px;text-overflow:ellipsis}.qtv-model-select select:disabled{cursor:not-allowed;opacity:.6}
+.qtv-inline-controls select{height:30px;min-width:64px;padding:0 20px 0 7px;border:0;border-radius:7px;outline:0;color:#ccc;background:#2b2b2b;font-size:10px}
+.qtv-inline-controls select:focus-visible{box-shadow:0 0 0 2px var(--node-accent)}
+.qtv-schema-settings{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:8px}.qtv-schema-settings label{display:grid;gap:3px;color:#777;font-size:8px}.qtv-schema-settings select,.qtv-schema-settings input[type=number]{width:100%;height:28px;padding:0 7px;border:1px solid #353535;border-radius:6px;color:#ccc;background:#242424;font-size:9px}.qtv-schema-settings input[type=checkbox]{width:16px;height:16px;accent-color:var(--node-accent)}
+.qtv-inline-run{width:34px;height:34px;display:grid;place-items:center;padding:0;border:0;border-radius:10px;color:#171717;background:#ececec}.qtv-inline-run:hover:not(:disabled){background:#fff}.qtv-inline-run:disabled{cursor:not-allowed;opacity:.35}
+.qtv-capability-note{grid-column:2/4;padding:5px 8px;border:1px solid #3a3a3a;border-radius:7px;color:#777;background:#202020;font-size:8px;white-space:nowrap}
+.qtv-inspector-open-composer{width:100%;height:34px;margin-bottom:10px;border:1px solid #3c3a51;border-radius:8px;color:#bab5e3;background:#282632;font-size:9px}.qtv-inspector-open-composer:hover{border-color:#5b567b;background:#302d3d}
+.qtv-variant-filmstrip{display:flex;gap:6px;padding:7px 9px;border-top:1px solid #313131;background:#191919;overflow-x:auto}.qtv-variant-filmstrip button{position:relative;flex:0 0 58px;height:42px;padding:0;border:1px solid #393939;border-radius:6px;color:#aaa;background:#242424;overflow:hidden}.qtv-variant-filmstrip button.is-keeper{border-color:#8d83ff;box-shadow:0 0 0 1px #8d83ff55}.qtv-variant-filmstrip img{width:100%;height:100%;object-fit:cover}.qtv-variant-filmstrip span{font-size:13px}.qtv-variant-filmstrip i{position:absolute;right:2px;bottom:2px;padding:1px 3px;border-radius:3px;color:#ddd;background:#000b;font-size:7px;font-style:normal}
+@media(prefers-reduced-motion:reduce){.qtv-node-progress.is-indeterminate>span{left:0;width:100%;opacity:.48;animation:none}.qtv-canvas-node.is-expanded .qtv-preview-toggle svg,.qtv-node-progress.is-determinate>span{transition:none}}
+/* 项目事实节点只映射真实分镜与产物，不暴露另一个会伪造任务的运行入口。 */
+.qtv-project-preview{position:relative;z-index:2;width:100%;height:100%;object-fit:contain;background:#111}
+.qtv-previous-preview-note{position:absolute;z-index:4;top:8px;left:8px;max-width:calc(100% - 16px);padding:5px 8px;border:1px solid rgba(250,198,131,.28);border-radius:5px;color:#ffcf9b;background:rgba(15,15,15,.88);font-size:10px;pointer-events:none}
+.qtv-project-preview-failed{position:relative;z-index:2;display:grid;height:100%;place-items:center;padding:20px;color:#f2b8bd;font-size:12px;text-align:center}
+.qtv-project-storyboard-text{position:relative;z-index:2;max-width:88%;max-height:80%;overflow:auto;color:#eee;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.6}
+.qtv-project-node-source{color:#a4acba;font-size:10px}
+.qtv-canvas-node:has(.qtv-project-node-source) .qtv-node-stage{cursor:default}
+.qtv-canvas-node:has(.qtv-project-node-source) .qtv-node-composer{width:430px;margin:8px auto 0}

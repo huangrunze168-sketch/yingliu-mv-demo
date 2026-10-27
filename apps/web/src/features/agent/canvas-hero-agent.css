@@ -1,0 +1,7 @@
+.qtv-canvas-agent-conversation > .agent-thread {display:block;flex:1;min-height:0;max-height:none;overflow-y:auto;overscroll-behavior:contain;padding:8px;border:0;background:transparent;scrollbar-width:thin}
+.qtv-canvas-agent-conversation .agent-msg {margin:9px 0;font-size:12px;line-height:1.55}
+.qtv-canvas-agent-conversation .agent-msg-body {min-width:0}
+.qtv-canvas-agent-conversation > .hero-agent-confirm {flex:0 0 auto;display:block}
+.qtv-canvas-agent-conversation > .qtv-canvas-agent-intro {margin:auto 0 12px;color:#bdb9ed;font-size:11px}
+.qtv-canvas-agent-conversation > .libtv-agent-composer {flex:0 0 auto}
+.qtv-canvas-agent-conversation .libtv-agent-composer textarea {height:76px;margin:0;padding:2px 3px;border:0;background:transparent;resize:none}

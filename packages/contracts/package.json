@@ -1,0 +1,7 @@
+{
+  "name": "@qiyin/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts", "./video-mode-validation": "./src/video-mode-validation.ts" }
+}

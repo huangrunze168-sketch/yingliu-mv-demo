@@ -1,0 +1,23 @@
+[Unit]
+Description=Yingliu MV runnable demo API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yingliu-demo
+Group=yingliu-demo
+Environment=PYTHONUNBUFFERED=1
+Environment=YINGLIU_DEMO_DATA=/var/lib/yingliu-demo/jobs
+EnvironmentFile=-/etc/yingliu-demo-api.env
+ExecStart=/usr/bin/python3 /opt/yingliu-demo-api/server.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/yingliu-demo
+
+[Install]
+WantedBy=multi-user.target

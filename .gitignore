@@ -1,0 +1,102 @@
+node_modules/
+dist/
+dist-electron/
+release/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+# 打包产物目录是 `release-0.2.0/` 这种**带版本号**的形态，
+# 上面那条 `release/` 匹配不到它们——实测这几个目录加起来约 3 GB。
+# 它们不是代码，是构建出来的安装包：不该进库。
+# （.gitignore 只认 `#` 注释；写 C 风格注释会把 `/*` 当成"忽略根下一切"的模式。）
+release-*/
+coverage/
+*.log
+artifacts/test-results/
+
+# 更新签名用的私钥**永远不入库**。
+# `scripts/update-sign.mts keygen --out .data/update-keys` 默认写在这里，
+# 而 `.data` 是默认入库的目录（见下面的说明），所以这条排除是必须的：
+# 私钥进了库，等于任何人都能签一份"官方更新包"。
+# 正式发布的私钥应当离线保管（HSM / 密码管理器），不进这台开发机。
+.data/update-keys/
+*.private.pem
+
+# .data 是运行目录，现在**默认全部入库**（口径见 docs/仓库与提交策略.md）：
+# 探针脚本是验证资产；里面混着页面快照、图标清单与运行结果等证据。
+# 之前那条 `.data/*` 把这些一并对掉了（父目录被忽略后，否定规则不生效），
+# 改成只排除二进制产物：
+#
+# 下面这些是**跑出来的**二进制（截图、视频、SQLite、日志），
+# 体积大且每次都不一样，不入库——注意它们仍留在磁盘上，不会被删。
+.data/**/*.png
+.data/**/*.jpg
+.data/**/*.jpeg
+.data/**/*.gif
+.data/**/*.webp
+.data/**/*.mp4
+.data/**/*.webm
+.data/**/*.mov
+.data/**/*.wav
+.data/**/*.mp3
+.data/**/*.db
+.data/**/*.db-shm
+.data/**/*.db-wal
+.data/**/*.sqlite
+.data/**/*.sqlite-shm
+.data/**/*.sqlite-wal
+.data/**/*.log
+
+# 调试用的浏览器 profile 不入库：里面是几百 MB 的缓存、LevelDB 与登录态，
+# 既不是代码也不是证据。
+# （profile 目录必须独立于默认 profile，否则 Chrome 会把参数转交给
+#   已在运行的实例，调试端口根本不会开。）
+
+# 模型权重**不入库**（三个文件合计约 294 MB，其中 168 MB 那个超过
+# GitHub 的单文件 100 MB 硬限制，推上去会被直接拒）。
+# 判据与 `.data/` 那条一致：代码与证据入库，可再生成的二进制不入库。
+# 这些权重按 `background-removal-js` 自己的文档可以重新下载/转换得到，
+# 不是一次性的证据。原始出处见 `docs/第三方代码来源.md`。
+third-party/github-evidence/background-removal-js/bundle/models/
+
+# ===== 2026-09-25 口径变更：仓库只放代码 =====
+# .data/ 运行数据与证据、docs/ 文档、third-party/ 第三方内容、
+# vendor/ 第三方源码、PROJECT.md 产品文档 —— 一律不入库（本地保留）。
+.data/
+docs/
+third-party/
+vendor/
+# OpenCut MIT 工作台壳是前端编译源码，不属于本地第三方检出目录。
+!apps/web/src/vendor/
+!apps/web/src/vendor/opencut/
+!apps/web/src/vendor/opencut/**
+# Velorn GPL-3.0 移植层随公开 Web Demo 分发许可证与来源说明。
+!apps/web/public/third-party/
+!apps/web/public/third-party/velorn/
+!apps/web/public/third-party/velorn/**
+PROJECT.md
+
+# 已移出索引的第三方抓取页（本地保留）
+canvas-mock.html
+
+# ===== Electron 桌面壳（本地保留归档，不入库） =====
+apps/desktop/
+electron.vite.config.ts
+scripts/build-generator-chips.mjs
+scripts/build-image-toolbar-icons.mjs
+scripts/fetch-lucide-icons.mjs
+scripts/sync-canvas-model-properties.mjs
+
+# ===== 桌面安装包图标（本地保留，不入库） =====
+build/
+.corepack/
+
+# 本地验证产物（不入库）
+.audit/
+.playwright-cli/
+
+# ===== 口径：只放代码（设计研究文档本地留存） =====
+DESIGN.md
+DESIGN-*.md

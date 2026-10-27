@@ -1,0 +1,519 @@
+/* ============================================================
+   期音科技 · 设计令牌（唯一真源）
+   ------------------------------------------------------------
+   三层结构（与 小QTV 一致）：
+     ① 色彩令牌层  --color-*
+     ② 语义层      --bg-* / --fg-* / --canvas-* / --border-*
+     ③ 系统层      z-index / 阴影 / 间距 / 圆角 / 字号
+   规则：组件层只引用语义层与系统层，不直接写色彩令牌，更不写字面量。
+
+   与 小QTV 的关系：语义值与画布值**逐条对齐**（如 --canvas-bg = neutral-950 = #141414），
+   差异仅在于本项目去掉了 Mantine 依赖，令牌命名保持自解释。
+   ============================================================ */
+
+.workbench-scope {
+  /* ============================================================
+     ① 色彩令牌层
+     ============================================================ */
+
+  /* 中性色阶：画布与面板的全部底色/描边/文字都从这里取 */
+  --color-neutral-0: #ffffff;
+  --color-neutral-50: #f7f7f7;
+  --color-neutral-100: #f2f3f5;
+  --color-neutral-200: #e5e6ec;
+  --color-neutral-300: #e3e3e3;
+  --color-neutral-400: #c4c4c4;
+  --color-neutral-500: #919191;
+  --color-neutral-600: #86909c;
+  --color-neutral-700: #525252;
+  --color-neutral-800: #363636;
+  --color-neutral-900: #171717;
+  --color-neutral-950: #141414;
+
+  /* 品牌色（2026-09-26 起 = Linear 薰衣草家族，与营销面同源）：
+     600 = Linear primary #5e6ad2（主 CTA/选中），400 = hover #828fff，
+     300 = 暗底上的浅色强调文字。锚点：DESIGN-linear.md。 */
+  --color-brand-50: #eef0fa;
+  --color-brand-300: #a5abf5;
+  --color-brand-400: #828fff;
+  --color-brand-500: #727ce0;
+  --color-brand-600: #5e6ad2;
+  --color-brand-900: #232650;
+
+  /* 功能色 */
+  --color-danger: #ff6a6f;
+  --color-red-500: #f53f3f;
+  --color-green-500: #64d959;
+  --color-emerald-400: #00d294;
+  --color-emerald-500: #00bb7f;
+  --color-yellow-500: #ff7d00;
+  --color-orange-400: #ff8b1a;
+  --color-blue-500: #147dff;
+  --color-blue-400: #3d9bff;
+  --color-sky-500: #00a5ef;
+
+  /* 透明度黑/白：小QTV 大量用它做描边与叠加，而非实色 */
+  --color-white-alpha-5: #ffffff0d;
+  --color-white-alpha-10: #ffffff1a;
+  --color-white-alpha-25: #ffffff40;
+  --color-white-alpha-50: #ffffff80;
+  --color-black-alpha-5: #0000000d;
+  --color-black-alpha-10: #0000001a;
+  --color-black-alpha-50: #00000080;
+  --color-black-alpha-60: #00000099;
+
+  /* ============================================================
+     ② 语义层
+     ============================================================ */
+
+  /* --- 页面与面板基底（[实测] 由令牌层推导）--- */
+  --bg-page: var(--color-neutral-50);
+  --bg-canvas: var(--color-neutral-100);
+  --bg-surface: var(--color-neutral-0);
+  --bg-surface-secondary: var(--color-neutral-50);
+  --bg-surface-elevated: var(--color-neutral-0);
+  --bg-overlay: var(--color-black-alpha-50);
+
+  /* --- 文字 --- */
+  --fg-default: var(--color-neutral-950);
+  --fg-muted: var(--color-neutral-700);
+  --fg-subtle: var(--color-neutral-500);
+  --fg-disabled: var(--color-neutral-500);
+  --fg-brand: var(--color-brand-400);
+  --fg-on-emphasis: var(--color-neutral-0);
+  --fg-secondary: #525252;
+
+  /* --- 描边 --- */
+  --border-default: var(--color-neutral-200);
+  --border-muted: var(--color-neutral-100);
+  --border-emphasis: var(--color-neutral-400);
+  --border-strong: var(--color-neutral-900);
+  --border-brand: var(--color-brand-400);
+  --border-width-hair: 0.5px;
+
+  /* --- 画布（[实测] 暗色主题；2026-09-26 表面阶梯对齐 Linear 蓝调暗家族）--- */
+  --canvas-bg: #0e0f12;
+  --canvas-bg-dot: #3a3d45;
+  --canvas-node-bg: #14171d;
+  --canvas-node-border: #26292f;
+  --canvas-node-border-selected: #a8a8a8;
+  --canvas-handle: #86909c;
+  --canvas-handle-bg: #202226e6;
+  --canvas-handle-icon: #ffffffb3;
+  --canvas-edge: #86909c;
+  --canvas-edge-hover: #c0c8d0;
+  --canvas-edge-selected: #e0e4e8;
+  --canvas-group-bg: #ffffff1a;
+  --canvas-group-border: #ffffff1a;
+  --canvas-selection-bg: #ffffff0f;
+
+  /* --- 画布控件 --- */
+  --canvas-controls-bg: #1f2126;
+  --canvas-controls-border: #2a2d33;
+  --canvas-controls-icon: #ffffffd9;
+  --canvas-controls-text: #ffffff;
+  --canvas-controls-text-muted: #919191;
+  --canvas-controls-hover: #ffffff1a;
+  --canvas-controls-active: #ffffff26;
+  --canvas-primary-btn-bg: #ffffffe6;
+  --canvas-primary-btn-bg-hover: #ffffffb3;
+  --canvas-primary-btn-icon: #141414;
+
+  /*
+    对话面板：**用户那一句的气泡底**与消息区的滚动条。
+
+
+      .copilotKitMessage.copilotKitUserMessage { background: var(--Surface-Group-background) }
+      .copilotKitMessages { scrollbar-color: rgba(255,255,255,0.4) transparent; }
+      .copilotKitMessages::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.4); border-radius: 3px; }
+      .copilotKitMessages::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.55); }
+
+    `--Surface-Group-background` 在它暗色主题下**实测**是 `#ffffff0d`（白 5%）。
+    别拿 `--canvas-controls-hover` 顶替：那个是白 10%，气泡会比线上实一倍。
+  */
+  --chat-user-bubble-bg: #ffffff0d;
+  --chat-scroll-thumb: #ffffff66;
+  --chat-scroll-thumb-hover: #ffffff8c;
+
+  /*
+    对话面板：**输入框那层框**的底与描边。
+
+
+      .copilotKitInput { background-color: var(--Surface-AgentPanel-background);
+                         border: 0.5px solid var(--Stroke-Medium); }
+
+    两个变量在它暗色主题下实测：`--Surface-AgentPanel-background: #212121`、
+    `--Stroke-Medium: #525252`（页面上量到的计算值就是 rgb(33,33,33) 与 rgb(82,82,82)）。
+    别拿 `--canvas-controls-*` 顶替：那是工具栏那一套（#262626 / #363636），
+    输入框的描边比它亮一档。
+  */
+  --chat-input-bg: #1a1c21;
+  --chat-input-border: #2e3138;
+
+  /*
+    「它正在做什么」那一行里那个转圈的颜色。
+    线上那行图标写的是 `text-black/45 dark:text-white/45`（45% = #73）。
+  */
+  --chat-activity-spinner: #ffffff73;
+
+  /*
+    顶栏浮层控件（小QTV 画布页实测）。
+    注意它和底部工具栏**不是**同一套底：工具栏是不透明的 #262626，
+    顶栏是同一个色值加 80% 透明度再叠 0.5px 描边，于是画布内容透出来一点点，
+    顶栏看起来像浮在画布上而不是贴在上面。这两处别互相复用。
+  */
+  --topnav-btn-bg: #1f2126cc;
+  --topnav-btn-border: #2a2d33;
+
+  /* --- 小地图 --- */
+  --canvas-minimap-bg: #1f1f1fe6;
+  --canvas-minimap-mask: #ffffff0a;
+  --canvas-minimap-mask-stroke: #ffffff59;
+  --canvas-minimap-node: #525252;
+
+  /* --- 面板（画布控件底色的别名）--- */
+  --panel-background: var(--canvas-controls-bg);
+
+  /* --- 节点缩略图（暗色下是深青灰渐变）--- */
+  --canvas-thumb-bg: linear-gradient(135deg, #1d242c, #182a2e);
+  --canvas-thumb-fg: #ffffff42;
+
+  /* --- 空状态四色功能胶囊（[截] 实测自界面截图，小QTV 未暴露为变量）--- */
+  --cap-script-bg: #1f6b4a;
+  --cap-role-bg: #e0453c;
+  --cap-video-bg: #3f4a5c;
+  --cap-audio-bg: #5b4a72;
+  /*
+    词条强调色（用于画布入口胶囊的图标）。
+
+    原来这四个 key 是**整块饱和填充**（#1f6b4a 深绿 / #e0453c 红 / #3f4a5c 石板 / #5b4a72 紫），
+    四个色块并排挂在画布中央，是整屏最扎眼的地方，也跟 小QTV 克制的做法相反：
+    那边只有主按钮用近白色（--canvas-primary-btn-bg），其余一律低调，
+    颜色只出现在小面积强调上。因此保留色相、把它降为图标底色。
+  */
+  --cap-script-accent: #3ddc97;
+  --cap-role-accent: #ff6b61;
+  --cap-video-accent: #8ea0bb;
+  --cap-audio-accent: #b79ae8;
+
+  /* ============================================================
+     ③ 系统层
+     ============================================================ */
+
+  /* --- z-index（[实测] 9 层，直接采用 小QTV 的分层）--- */
+  --z-chrome: 100;
+  --z-sticky: 200;
+  --z-dropdown: 300;
+  --z-panel: 400;
+  --z-modal: 500;
+  --z-overlay: 600;
+  --z-toast: 700;
+  --z-critical: 800;
+  --z-login-modal: 2200;
+
+  /* --- 阴影（[实测] 画布专用三档）--- */
+  --canvas-shadow-panel: 0px 2px 5px #00000026;
+  --canvas-shadow-menu: 0 8px 32px #00000026, 0 2px 8px #0000001a;
+  --canvas-shadow-dropdown: 0px 4px 10px #00000040, 0px 2px 4px #0000004d;
+  --panel-transparent-shadow: 0px 4px 10px 0px #0000001a;
+
+  /* --- 字体（[实测] Mantine font-family，无 webfont 依赖）--- */
+  --font-sans: 'MiSans VF', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'HarmonyOS Sans SC', 'MiSans', 'PingFang SC', 'Noto Sans SC', 'Source Han Sans SC', 'Source Han Sans CN', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'MiSans VF', 'Noto Sans SC', monospace;
+
+  /* --- 字号阶梯 --- */
+  --text-display: 30px;
+  --text-h1: 24px;
+  --text-h2: 18px;
+  --text-h3: 15px;
+  --text-body: 13px;
+  --text-body-sm: 12px;
+  --text-label: 11px;
+  --text-micro: 10px;
+
+  /* --- 行高（[实测] --mantine-line-height 系列）--- */
+  --leading-display: 1.25;
+  --leading-heading: 1.35;
+  --leading-body: 1.55;
+  --leading-label: 1.4;
+
+  /* --- 字重 --- */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* --- 字距 --- */
+  --tracking-none: 0;
+  --tracking-title: .02em;
+  --tracking-caps: .12em;
+
+  /* --- 间距（4px 基数）--- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* --- 圆角（[实测] 对齐 Mantine：xs .125 / sm .25 / md .5 / lg 1 rem）--- */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 16px;
+  --radius-full: 999px;
+
+  /* --- 动效：时长 --- */
+  /*
+    补齐动效令牌层前，色彩/字号/间距/圆角都已收敛，唯独动效是就地字面量：
+    实测非画布样式层 `.14s` 出现 69 次、`ease` 94 次、`cubic-bezier()` 三种写法并存，
+    导致"整体调快一点/调慢一点"只能全库搜索替换。
+    本组是动效的唯一真源，组件层不得再写字面量时长。
+    档位不是凭空定的：140ms 是既有实现的主力档（69 处），其余按实测出现值与语义归档。
+  */
+  --dur-instant: 100ms;   /* 极短反馈：按下、选中 */
+  --dur-fast: 140ms;      /* ★ 交互反馈主力：hover / focus / 颜色与描边 */
+  --dur-base: 160ms;      /* 面板开合、transform 位移 */
+  --dur-slow: 200ms;      /* 展开折叠、较大面积变化 */
+  --dur-slower: 300ms;    /* 抽屉、模态进出 */
+  --dur-pulse: 1200ms;    /* 状态脉冲（循环） */
+  --dur-ambient: 4000ms;  /* 环境级循环动画 */
+
+  /* --- 动效：缓动 --- */
+  /*
+    前三条与 CSS 关键字**等值**（cubic-bezier 展开式），所以"关键字 → 令牌"
+    是零观感变化的替换；将来若统一到 Material 强调曲线，只改本处一行即可。
+      ease        = cubic-bezier(.25, .1, .25, 1)
+      ease-out    = cubic-bezier(0, 0, .58, 1)
+      ease-in-out = cubic-bezier(.42, 0, .58, 1)
+  */
+  --ease-standard: cubic-bezier(.25, .1, .25, 1);
+  --ease-out: cubic-bezier(0, 0, .58, 1);
+  --ease-in-out: cubic-bezier(.42, 0, .58, 1);
+  --ease-emphasized: cubic-bezier(.4, 0, .2, 1);
+  --ease-linear: linear;
+
+  /* ============================================================
+     --- 动效：对标站 分级（对标站 首页，实测 601 条 transition 规则） ---
+     ============================================================
+     取证方式：无头浏览器遍历 对标站 全部 styleSheets 的 cssRules，抽出
+     transitionProperty/Duration/TimingFunction 三元组后按毫秒分桶（见
+     ~/.workbuddy/binaries/node/workspace/对标站-motion-tiers.js）。
+
+     关键结论（推翻"对标站 就是统一快"的臆测）：
+     对标站 **不是**一个时长打天下，而是 7 档，且**同一元素的不同属性走不同档**：
+       header    { transform 0.7s cubic-bezier(.4,0,.2,1), color 0.2s ease-out,
+                   background-color 0.2s ease-out }
+       .nav-link { color 0.2s ease-out, background-color 0.1s ease-out, scale 0.5s ease-out }
+     所以"高级感"= 属性级分档，不是"整体调到某个值"。分档依据如下（实测样本）：
+
+       1 press     100ms  .tooltip scale 80ms / .duration-100          → 按下确认
+       2 feedback  200ms  .active-scale transform .15s / nav-link color .2s → 颜色·底色·描边
+       3 tint      300ms  .k__button color .3s                         → 品牌色过渡
+       4 hover     500ms  .nav-link scale .5s ease-out                 → transform/scale 悬停
+       5 layout    700ms  .header transform .7s cubic-bezier(.4,0,.2,1) → 版面位移
+       6 enter    1000ms  .hero-copy opacity 1s + scale 1s             → 首屏入场
+       7 ambient  2000ms  --animate-pulse 2s / agent-glow-shimmer      → 环境循环
+
+     ⚠ 与旧 --dur-* 的分工：--dur-* 继续服务已收敛的画布/交付面（改了会动
+     既有视觉基线）；--motion-* 是本组的**属性级语义档**，新代码与本次
+     落地页/工作台改造一律用 --motion-*。两者并存，不互相改名。
+  */
+
+  /* --- 第 1–7 档时长 --- */
+  --motion-press: 100ms;
+  --motion-feedback: 200ms;
+  --motion-tint: 300ms;
+  --motion-hover: 500ms;
+  --motion-layout: 700ms;
+  --motion-enter: 1000ms;
+  --motion-ambient: 2000ms;
+
+  /* --- 对标站 的两条主曲线（实测其 --default-transition-timing-function 与 --ease-out） ---
+     ⚠ 语义与旧 --ease-out 不同：旧的是 CSS `ease-out` 等值式(.0,0,.58,1)，
+     这里 --motion-ease-out 是 对标站 实际用的 (0,0,.2,1) —— 收尾更慢、更"重"。 */
+  --motion-ease: cubic-bezier(.4, 0, .2, 1);       /* 对标站 默认：版面位移 + 悬停 */
+  --motion-ease-out: cubic-bezier(0, 0, .2, 1);    /* 按压/悬停 scale */
+  --motion-ease-soft: cubic-bezier(.4, 0, .6, 1);  /* 环境呼吸（对标站 --animate-pulse 曲线） */
+
+  /* --- 参数化动效（对标 对标站 --genius-hover-float-speed / --effort-motion-speed）---
+     悬停漂浮：大媒体瓦片/卡片的持续微浮，速度与回弹各自一个 token，
+     调"漂浮手感"只动这两行，不必进组件找 tween。 */
+  --motion-hover-float: 3.6s;
+  --motion-hover-float-bounce: cubic-bezier(.34, 1.32, .6, 1);
+
+  /* 遗留：非画布迁移完成后回填。canvas.css 与其两份契约测试
+     （canvas-ui-contract.test.ts / agent-activity-status.test.ts）在本仓库
+     已不存在 —— 上一条注释引用的 file:line 是失效引用，勿再据它设限。 */
+
+  /* --- 布局 --- */
+  /* 小QTV 侧栏实测 240px（<aside> 计算宽度） */
+  --sidebar-w: 240px;
+  --inspector-w: 268px;
+  --control-h: 36px;
+  --content-max: 1680px;
+}
+
+/* ============================================================
+   兼容别名层
+   ------------------------------------------------------------
+   工作台（components.css）沿用旧变量名，此处映射到新的语义层，
+   避免一次性改动过大。新代码请直接用语义层变量。
+   ============================================================ */
+.workbench-scope {
+  /*
+    主文字色。
+
+    ⚠ 这里必须写死浅色，不能指 --fg-default：--fg-default 在第 ② 层语义层里
+    是**亮色**主题的值（neutral-950 = #141414），而这一层是给暗色底用的别名层。
+    指过去的结果是"主文字色"变成近黑——凡是用了 --ink-0 的地方
+    （标题、卡片名、按钮悬停字色…）在深色底上全部看不见，
+    偏偏 --ink-1/2/4 在本层是写死的浅灰，于是只有"最重要"的那一档失效，很难联想到令牌。
+    取值 #f7f7f7 与 小QTV 实测正文色一致。
+  */
+  --ink-0: var(--color-neutral-50);
+  --ink-1: #c9c9c9;
+  --ink-2: #a0a0a0;
+  --ink-3: var(--fg-subtle);
+  --ink-4: #4a4a4a;
+
+  --brand-500: var(--color-brand-400);
+  --brand-400: var(--color-brand-300);
+  --brand-600: var(--color-brand-600);
+  --brand-deep: var(--color-brand-600);
+  --brand-ink: #04212b;
+
+  --primary: var(--color-blue-500);
+  --primary-hover: var(--color-blue-400);
+
+  --success: var(--color-emerald-400);
+  --warning: var(--color-orange-400);
+  --danger: var(--color-danger);
+  /* 错误态的浅底：危险色直接当背景太扎眼，压一档用来铺底 */
+  --danger-soft: #3a1d1d;
+  --info: var(--color-blue-400);
+
+  /* 工作台三层表面（2026-09-26 对齐 Linear 表面阶梯：暗一档画布 + 蓝调灰阶，
+     与营销面 #08090b 同族但整体浮一档，见 DESIGN-linear.md 表面阶梯原则） */
+  --canvas-bg-workbench: #0b0c0f;
+  --bg: #0b0c0f;
+  --surface-1: #131419;
+  --surface-2: #191a20;
+  --surface-3: #1f2127;
+  --surface-4: #272a31;
+
+  /*
+    次级按钮（小QTV 项目页实测：底 rgba(255,255,255,.1)）。
+    单独开一个令牌而不是复用 --surface-3：#242424 是**不透明**的固定色，
+    而这里是叠在页面底上的半透明加亮，底色一变观感差别就看得出。
+  */
+  --btn-secondary-bg: #ffffff1a;
+  --btn-secondary-bg-hover: #ffffff26;
+
+  /* 项目卡封面底色（跟随新阶梯：surface-2 上浮一档） */
+  --card-cover-bg: #17181e;
+  --card-cover-bg-hover: #1d1f26;
+  --surface-inset: #0f1013;
+
+  --line: var(--color-white-alpha-5);
+  --line-strong: var(--color-white-alpha-10);
+
+  /* 零阴影哲学：卡片深度靠发丝边框与表面明暗分层，不靠 box-shadow */
+  --shadow-panel: none;
+  --shadow-pop: var(--canvas-shadow-menu);
+  --shadow-modal: var(--canvas-shadow-dropdown);
+  --shadow-brand: none;
+
+  --grid-dot: rgba(255, 255, 255, .035);
+  --link: var(--canvas-edge);
+  --link-active: var(--color-brand-400);
+}
+
+/* ============================================================
+   亮色画布主题（[实测] 小QTV 支持 .canvas-light）
+   用法：给画布根节点加 class="canvas-light" 即切换为亮色画布。
+   ============================================================ */
+.canvas-light {
+  /* 画布本体 */
+  --canvas-bg: #f5f5f5;
+  --canvas-bg-dot: #dedede;
+  --canvas-node-bg: #ffffff;
+  --canvas-node-border: #e3e3e3;
+  --canvas-node-border-selected: #919191;
+  --canvas-handle: #919191;
+  --canvas-handle-bg: transparent;
+  --canvas-handle-icon: #000000b3;
+  --canvas-edge: #c4c4c4;
+
+  /* 画布控件：亮色下转为白底深字 */
+  --canvas-controls-bg: var(--color-neutral-0);
+  --canvas-controls-border: var(--color-neutral-200);
+  --canvas-controls-icon: #000000b3;
+  --canvas-controls-text: var(--color-neutral-950);
+  --canvas-controls-text-muted: var(--color-neutral-600);
+  --canvas-controls-hover: var(--color-black-alpha-5);
+  --canvas-controls-active: var(--color-black-alpha-10);
+  --canvas-minimap-bg: #ffffffe6;
+  --canvas-minimap-node: var(--color-neutral-400);
+  --canvas-primary-btn-bg: var(--color-neutral-950);
+  --canvas-primary-btn-icon: var(--color-neutral-0);
+
+  /*
+    对话面板：用户气泡底与滚动条。线上那份亮色值**没量到**（这台机器的 小QTV 是暗的，
+    页面上没有 light 作用域），所以按同一档 alpha 取黑 5% / 黑 22% 与 32%——
+    这正是它那段 CSS 里给亮色另写的一档（原文 `[data-mantine-color-scheme='light']` 那几条）。
+  */
+  --chat-user-bubble-bg: var(--color-black-alpha-5);
+  --chat-scroll-thumb: #00000038;
+  --chat-scroll-thumb-hover: #00000052;
+
+  /*
+    输入框那层框。线上只跑了暗色（这台机器的 小QTV 是暗的），亮色那份值没量到——
+    所以取"面板白底 + 一档灰描边"，也就是我们亮色画布里 `--canvas-controls-*` 那两个值。
+  */
+  --chat-input-bg: var(--color-neutral-0);
+  --chat-input-border: var(--color-neutral-200);
+
+  --chat-activity-spinner: #00000073;
+
+  /* 顶栏浮层控件：亮色下换白底，描边仍比底稍深一档 */
+  --topnav-btn-bg: #ffffffe6;
+  --topnav-btn-border: #e3e3e3;
+
+  /* 文字与表面：亮色画布上文字必须转深色，否则不可读 */
+  --fg-default: var(--color-neutral-950);
+  --fg-muted: var(--color-neutral-700);
+  --fg-subtle: var(--color-neutral-500);
+  --ink-0: var(--color-neutral-950);
+  --ink-1: var(--color-neutral-700);
+  --ink-2: var(--color-neutral-600);
+  --ink-3: var(--color-neutral-500);
+  --ink-4: var(--color-neutral-400);
+
+  /* 亮色下错误态的浅底要反过来变浅，不然深红底配深红字完全读不出来 */
+  --danger-soft: #ffecec;
+
+  --surface-1: var(--color-neutral-0);
+  --surface-2: var(--color-neutral-50);
+  --surface-3: var(--color-neutral-0);
+  --surface-4: var(--color-neutral-200);
+
+  --btn-secondary-bg: #0000000d;
+  --btn-secondary-bg-hover: #0000001a;
+  --card-cover-bg: #ededed;
+  --card-cover-bg-hover: #e4e4e4;
+  --surface-inset: var(--color-neutral-50);
+  --line: var(--color-black-alpha-5);
+  --line-strong: var(--color-black-alpha-10);
+
+  --canvas-thumb-bg: linear-gradient(135deg, var(--color-neutral-100), var(--color-neutral-200));
+  --canvas-thumb-fg: #00000042;
+}
+
+
+
+/* web 工作台补充：四层表面契约。 */
+.workbench-scope { --surface-pop: var(--surface-4); }
+
+
+

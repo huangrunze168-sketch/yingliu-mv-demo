@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#08090b" />
+    <title>映流 MV · AI 音乐视频工作流</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- MiSans VF（小米，Apache-2.0，可变字重 150–700；按 unicode-range 切成 56 片，按需加载） -->
+    <link rel="stylesheet" href="/fonts/misans/MiSansVF.min.css" />
+    <!-- 星野「拼字」用的两个 MiSans 切片必须**抢在首屏 JS 之前**就绪：
+         hero 的引力透镜会把 '小QTV' 用 `getComputedStyle(canvas).fontFamily` 画进
+         1000×300 的 2D canvas，再逐 2px 采样 alpha>160 的点，当作三维粒子的「字形点集」。
+         若采样时某个字符所属的切片还没到，该字符就落回系统字体（Segoe UI）→ 宽度变化
+         → `glyphScale = 0.9 / measureText('小QTV').width` 变化 → 整片星野的图案、疏密、
+         亮度全都不一样：**冷加载与刷新后看到的星野是两个样子**。
+         用到的片：第 50 片 `U+21-7e,U+a0-108`（Q/T/V）；第 0 片常用字（`小` U+5C0F）。
+         对标页正是用 `rel="preload" as="font"` 把参照字体提到最高优先级，
+         从而让这次采样稳定命中自家字体；这里对这两个 MiSans 切片做同一件事。 -->
+    <link rel="preload" as="font" type="font/woff2" href="/fonts/misans/MiSansVF.3ee7f36171786397.50.woff2" crossorigin />
+    <link rel="preload" as="font" type="font/woff2" href="/fonts/misans/MiSansVF.16240990c6f7f7dd.0.woff2" crossorigin />
+  </head>
+  <body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body>
+</html>

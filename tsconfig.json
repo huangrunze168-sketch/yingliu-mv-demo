@@ -1,0 +1,40 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "types": ["node", "vitest/globals"],
+    "baseUrl": ".",
+    "paths": {
+      "@qiyin/contracts": ["packages/contracts/src/index.ts"],
+      "@qiyin/domain": ["packages/domain/src/index.ts"],
+      "@qiyin/spatial-control": ["packages/spatial-control/src/index.ts"],
+      "@qiyin/frontkernel-adapter": ["packages/frontkernel-adapter/src/index.ts"],
+      "@qiyin/kernel-service": ["packages/kernel-service/src/index.ts"],
+      "@qiyin/canvas-adapter": ["packages/canvas-adapter/src/index.ts"],
+      "@qiyin/generation-service": ["packages/generation-service/src/index.ts"],
+      "@qiyin/generation-backend": ["packages/generation-backend/src/index.ts"],
+      "@qiyin/generation-backends": ["packages/generation-backends/src/index.ts"],
+      "@qiyin/imagegen-adapter": ["packages/imagegen-adapter/src/index.ts"],
+      "@qiyin/videogen-adapter": ["packages/videogen-adapter/src/index.ts"],
+      "@qiyin/update-service": ["packages/update-service/src/index.ts"],
+      "@qiyin/plugin-host": ["packages/plugin-host/src/index.ts"],
+      "@qiyin/provider-auth": ["packages/provider-auth/src/index.ts"],
+      "@qiyin/local-backend-host": ["apps/local-backend-host/src/index.ts"]
+    }
+  },
+  "include": ["apps/**/*.ts", "apps/**/*.tsx", "packages/**/*.ts", "tests/**/*.ts", "vitest.config.ts"],
+  /* apps/web 是 Vite 单页应用，模块解析走 Bundler（见 apps/web/tsconfig.json）。
+     本文件的 moduleResolution: NodeNext 对它不适用：会要求所有相对导入带 .js 后缀，
+     等于把一个 Vite 应用当 Node ESM 来检查。apps/web 由自己的 check 脚本覆盖，
+     并已接入 verify 里的 check:web。
+     apps/desktop 是 Electron 桌面壳（已不入库，本地归档），不参与类型检查。 */
+  "exclude": ["apps/web", "apps/desktop"]
+}

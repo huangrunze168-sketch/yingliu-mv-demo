@@ -1,0 +1,13 @@
+{
+  "name": "@qiyin/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@qiyin/canvas-adapter": "workspace:*",
+    "@qiyin/domain": "workspace:*",
+    "@qiyin/frontkernel-adapter": "workspace:*",
+    "@qiyin/generation-service": "workspace:*",
+    "@qiyin/kernel-service": "workspace:*"
+  }
+}
