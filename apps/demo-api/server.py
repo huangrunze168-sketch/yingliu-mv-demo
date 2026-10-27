@@ -433,6 +433,7 @@ class ModelsNexusVideoAdapter:
     template_version = "v1"
     submit_path = "/v1/videos"
     status_path = "/v1/videos/{id}"
+    poll_interval_seconds = 5
     allowed_ratios = frozenset({"16:9", "9:16", "1:1"})
 
     @property
@@ -484,6 +485,8 @@ class ModelsNexusVideoAdapter:
 class SeedanceOverseasAdapter(ModelsNexusVideoAdapter):
     family = "seedance"
     template_version = "seedance-overseas-v2"
+    # ModelsNexus 模型广场要求 Seedance 任务每 30–60 秒查询一次，避免高频轮询。
+    poll_interval_seconds = 30
 
     def build_payload(self, prompt: str, ratio: str, duration: int,
                       references: ModelReferences) -> dict[str, Any]:
@@ -728,37 +731,43 @@ def upload_seedance_asset(job_id: str, key: str, path: pathlib.Path, model: str)
     state = read_state(job_id)
     assets = state.get("media_assets") if isinstance(state.get("media_assets"), dict) else {}
     existing = assets.get(key) if isinstance(assets, dict) else None
-    if isinstance(existing, dict) and existing.get("uri"):
+    if (isinstance(existing, dict) and existing.get("uri") and
+            str(existing.get("status", "")).lower() == "ready"):
         return str(existing["uri"])
     if isinstance(existing, dict) and existing.get("submission_state") == "uploading" and not existing.get("id"):
         raise RuntimeError(f"素材 {key} 上传结果未知；为避免重复上传，系统不会自动重试")
 
     media_type = seedance_media_type(key)
-    body, content_type = encode_multipart({}, ("file", path))
-    assets[key] = {"submission_state": "uploading", "type": media_type, "filename": path.name}
-    write_state(job_id, media_assets=assets, stage=f"正在上传 ModelsNexus 私有素材 · {key}")
-    request = urllib.request.Request(
-        f"{MODELSNEXUS_BASE}/v1/media/assets/upload?type={quote(media_type)}&model={quote(model)}",
-        data=body,
-        headers=modelsnexus_headers(MODELSNEXUS_API_KEY, content_type, f"yingliu-{job_id}-asset-{key}"),
-        method="POST",
-    )
-    response = api_json(request, timeout=300)
-    asset_id = str(response.get("id") or "")
-    if not asset_id:
-        raise RuntimeError(f"ModelsNexus 素材上传未返回 ID：{json.dumps(response, ensure_ascii=False)[:600]}")
-    assets[key] = {
-        "submission_state": "submitted",
-        "type": media_type,
-        "filename": path.name,
-        "id": asset_id,
-        "status": str(response.get("status", "processing")),
-        "uri": str(response.get("uri") or ""),
-    }
-    write_state(job_id, media_assets=assets)
+    if isinstance(existing, dict) and existing.get("id"):
+        # 已有素材 ID 时只恢复查询，不能为了等待 ready 再次上传同一文件。
+        asset_id = str(existing["id"])
+        assets[key] = existing
+    else:
+        body, content_type = encode_multipart({}, ("file", path))
+        assets[key] = {"submission_state": "uploading", "type": media_type, "filename": path.name}
+        write_state(job_id, media_assets=assets, stage=f"正在上传 ModelsNexus 私有素材 · {key}")
+        request = urllib.request.Request(
+            f"{MODELSNEXUS_BASE}/v1/media/assets/upload?type={quote(media_type)}&model={quote(model)}",
+            data=body,
+            headers=modelsnexus_headers(MODELSNEXUS_API_KEY, content_type, f"yingliu-{job_id}-asset-{key}"),
+            method="POST",
+        )
+        response = api_json(request, timeout=300)
+        asset_id = str(response.get("id") or "")
+        if not asset_id:
+            raise RuntimeError(f"ModelsNexus 素材上传未返回 ID：{json.dumps(response, ensure_ascii=False)[:600]}")
+        assets[key] = {
+            "submission_state": "submitted",
+            "type": media_type,
+            "filename": path.name,
+            "id": asset_id,
+            "status": str(response.get("status", "processing")).lower(),
+            "uri": str(response.get("uri") or ""),
+        }
+        write_state(job_id, media_assets=assets)
 
     deadline = time.time() + 900
-    while not assets[key].get("uri"):
+    while not (assets[key].get("uri") and assets[key].get("status") == "ready"):
         if time.time() >= deadline:
             raise RuntimeError(f"ModelsNexus 素材 {key} 处理超时；保留任务 ID，禁止重复上传")
         query = urllib.request.Request(
@@ -772,8 +781,6 @@ def upload_seedance_asset(job_id: str, key: str, path: pathlib.Path, model: str)
         write_state(job_id, media_assets=assets)
         if status in {"failed", "error", "cancelled", "canceled"}:
             raise RuntimeError(f"ModelsNexus 素材 {key} 处理失败：{result.get('error') or result.get('message') or status}")
-        if uri and status == "ready":
-            break
         time.sleep(3)
     return str(assets[key]["uri"])
 
@@ -911,7 +918,7 @@ def wait_and_download_video(job_id: str, task_key: str, upstream_id: str, api_ke
             break
         if status in {"failed", "cancelled", "canceled", "error"}:
             raise RuntimeError(f"上游视频生成失败：{adapter.error_message(response)}")
-        time.sleep(5)
+        time.sleep(adapter.poll_interval_seconds)
     video_url = adapter.download_url(final_response)
     if not video_url:
         raise RuntimeError(f"{adapter.model} 已完成，但响应未返回官方 download_url；保留任务 ID，禁止重新生成")

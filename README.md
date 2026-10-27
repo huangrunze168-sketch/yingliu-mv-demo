@@ -48,7 +48,7 @@ corepack pnpm --filter @qiyin/web build
 
 - 项目、上传素材和任务状态由服务端保存；生产环境请自行增加认证、访问控制和备份。
 - `/jobs` 使用 `client_request_id` 实现幂等提交，避免重复创建上游任务。
-- 上传素材会按用户确认发送给 ModelsNexus；短时签名链接默认两小时过期。
+- 上传素材会按用户确认通过受信任 HTTPS 短时链接发送给 ModelsNexus；签名链接默认六小时过期。
 - 工作台交互层包含基于 Velorn 的 GPL-3.0 移植，来源与许可证见 [`apps/web/public/third-party/velorn/NOTICE.md`](apps/web/public/third-party/velorn/NOTICE.md)。
 
 ---

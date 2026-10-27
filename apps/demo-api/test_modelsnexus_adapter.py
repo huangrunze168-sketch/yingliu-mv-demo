@@ -92,6 +92,55 @@ class ModelsNexusAdapterTests(unittest.TestCase):
             "https://assets.example/song",
         ))
 
+    def test_media_upload_waits_for_ready_even_when_processing_has_uri(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = pathlib.Path(temporary)
+            media = directory / "portrait.png"
+            media.write_bytes(b"image")
+            state = {"media_assets": {}}
+
+            def fake_read_state(_job_id: str):
+                return state
+
+            def fake_write_state(_job_id: str, **updates):
+                state.update(updates)
+                return state
+
+            responses = [
+                {"id": "asset-1", "status": "processing", "uri": "asset://asset-1"},
+                {"id": "asset-1", "status": "ready", "uri": "asset://asset-1"},
+            ]
+            with patch.object(server, "read_state", side_effect=fake_read_state), \
+                 patch.object(server, "write_state", side_effect=fake_write_state), \
+                 patch.object(server, "api_json", side_effect=responses), \
+                 patch.object(server.time, "sleep"):
+                uri = server.upload_seedance_asset("job-1", "portrait", media, "sd2.5海外版-480p")
+
+        self.assertEqual(uri, "asset://asset-1")
+        self.assertEqual(state["media_assets"]["portrait"]["status"], "ready")
+
+    def test_media_upload_resumes_existing_asset_without_uploading_again(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            media = pathlib.Path(temporary) / "portrait.png"
+            media.write_bytes(b"image")
+            state = {"media_assets": {"portrait": {
+                "submission_state": "submitted", "type": "image", "filename": media.name,
+                "id": "asset-1", "status": "processing", "uri": "asset://asset-1",
+            }}}
+
+            with patch.object(server, "read_state", return_value=state), \
+                 patch.object(server, "write_state", side_effect=lambda _job_id, **updates: state.update(updates)), \
+                 patch.object(server, "api_json", return_value={
+                     "id": "asset-1", "status": "ready", "uri": "asset://asset-1",
+                 }) as api_json, \
+                 patch.object(server, "encode_multipart") as encode_multipart, \
+                 patch.object(server.time, "sleep"):
+                uri = server.upload_seedance_asset("job-1", "portrait", media, "sd2.5海外版-480p")
+
+        self.assertEqual(uri, "asset://asset-1")
+        self.assertEqual(api_json.call_count, 1)
+        encode_multipart.assert_not_called()
+
     def test_each_supported_model_has_its_own_adapter_instance(self) -> None:
         expected_classes = {
             "sd2.0海外版-480p": server.Seedance20Overseas480Adapter,
@@ -166,6 +215,10 @@ class ModelsNexusAdapterTests(unittest.TestCase):
             server.video_model_adapter("sd2.0海外版-480p").validate("16:9", 30)
         with self.assertRaises(ValueError):
             server.video_model_adapter("minimax-h3-2k").validate("16:9", 16)
+
+    def test_seedance_uses_documented_poll_interval(self) -> None:
+        self.assertEqual(server.video_model_adapter("sd2.5海外版-480p").poll_interval_seconds, 30)
+        self.assertEqual(server.video_model_adapter("minimax-h3-768p").poll_interval_seconds, 5)
 
     def test_model_aliases_are_strict(self) -> None:
         for model in (*server.SEEDANCE_MODEL_SPECS, *server.MINIMAX_MODEL_SPECS):

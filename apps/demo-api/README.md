@@ -22,5 +22,9 @@ Seedance 直接交付模型结果；MiniMax 单段上限 15 秒，长视频由 F
 `xiaoyou.conf` 暴露 `/yingliu-demo-api/` 和 `/yingliu-demo-results/`。
 
 外部模型凭证通过 `/etc/yingliu-demo-api.env` 注入，严禁写入前端产物。完整配置见
-`.env.example`。`YINGLIU_DEMO_PUBLIC_API_BASE` 必须是 ModelsNexus 可以访问的公网 API
-地址，用于生成两小时有效的素材签名链接。
+`.env.example`。`YINGLIU_DEMO_PUBLIC_API_BASE` 必须是 ModelsNexus 可以访问、使用受信任
+证书的 HTTPS 公网 API 地址，用于生成六小时有效的素材签名链接。不要使用纯 HTTP IP：
+虽然浏览器可以正常下载，Seedance 上游仍可能在抓取阶段返回 `fail_to_fetch_task / 502`。
+
+Seedance 状态按 ModelsNexus 文档每 30 秒轮询。ModelsNexus 媒体库上传只有在
+`status=ready` 且返回 URI 时才可用于生成；`processing` 阶段提前返回的 URI 不能使用。
