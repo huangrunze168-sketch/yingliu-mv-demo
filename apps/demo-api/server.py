@@ -50,6 +50,10 @@ IMAGE_API_KEY = os.environ.get("IMAGE_API_KEY", "")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE = os.environ.get("DEEPSEEK_BASE", "https://api.deepseek.com").rstrip("/")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
+DSH_AGENT_MODE = os.environ.get("DSH_AGENT_MODE", "auto").strip().lower()
+DSH_COMMAND = os.environ.get("DSH_COMMAND", "dsh")
+DSH_HOME = pathlib.Path(os.environ.get("DSH_HOME", str(DATA_ROOT.parent / "dsh")))
+DSH_TIMEOUT_SECONDS = int(os.environ.get("DSH_TIMEOUT_SECONDS", "900"))
 
 DATA_ROOT.mkdir(parents=True, exist_ok=True)
 PROJECTS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -1355,6 +1359,30 @@ def reference_frame_data_url(path: pathlib.Path, output: pathlib.Path, timestamp
     return f"data:image/jpeg;base64,{encoded}"
 
 
+def reference_contact_sheet_data_url(
+    path: pathlib.Path,
+    output: pathlib.Path,
+    start: float,
+    end: float,
+    frame_count: int = 4,
+) -> str:
+    """为一个镜头区间生成按时间排序的连续关键帧图，供视觉模型判断动作与运镜。"""
+    duration = max(0.2, end - start)
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(path),
+            "-vf", f"scale=360:-2,fps={frame_count}/{duration:.6f},tile={frame_count}x1",
+            "-frames:v", "1", "-q:v", "4", str(output),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=90,
+    )
+    encoded = base64.b64encode(output.read_bytes()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
 def detect_reference_scene_cuts(path: pathlib.Path, duration: float) -> list[float]:
     """用 FFmpeg 场景差异检测取得候选切点；失败时退回均匀采样。"""
     try:
@@ -1386,6 +1414,203 @@ def reference_sample_times(duration: float, cuts: list[float], limit: int = 10) 
     return [unique[index] for index in indexes]
 
 
+def reference_scene_segments(duration: float, cuts: list[float], limit: int = 12) -> list[dict[str, Any]]:
+    """把切点转换为覆盖完整视频的镜头区间；切点过多时按时间连续合并。"""
+    boundaries = [0.0, *sorted(value for value in cuts if 0 < value < duration), duration]
+    raw = [(boundaries[index], boundaries[index + 1]) for index in range(len(boundaries) - 1)]
+    if len(raw) <= limit:
+        groups = [[item] for item in raw]
+    else:
+        groups = []
+        for index in range(limit):
+            left = round(index * len(raw) / limit)
+            right = round((index + 1) * len(raw) / limit)
+            groups.append(raw[left:max(left + 1, right)])
+    return [
+        {
+            "index": index + 1,
+            "start_seconds": round(group[0][0], 3),
+            "end_seconds": round(group[-1][1], 3),
+            "source_time": f"{format_timestamp(group[0][0])}–{format_timestamp(group[-1][1])}",
+            "contained_cut_times": [
+                format_timestamp(value)
+                for value in cuts
+                if group[0][0] < value < group[-1][1]
+            ],
+        }
+        for index, group in enumerate(groups)
+    ]
+
+
+def parse_agent_json(content: str) -> dict[str, Any]:
+    """解析模型返回的 JSON，并容忍代码块、尾随说明与连续 JSON 对象。"""
+    text = content.lstrip("\ufeff\r\n\t ")
+    if text.startswith("```"):
+        first_line_end = text.find("\n")
+        if first_line_end >= 0:
+            text = text[first_line_end + 1:]
+
+    decoder = json.JSONDecoder()
+    objects: list[dict[str, Any]] = []
+    position = 0
+    while position < len(text):
+        object_start = text.find("{", position)
+        array_start = text.find("[", position)
+        starts = [index for index in (object_start, array_start) if index >= 0]
+        if not starts:
+            break
+        start = min(starts)
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            position = start + 1
+            continue
+        if isinstance(value, dict):
+            objects.append(value)
+        position = max(end, start + 1)
+
+    if not objects:
+        raise RuntimeError("DeepSeek 返回内容不是合法 JSON，请重试")
+
+    # 第一个对象通常是完整主结果；后续对象仅补齐缺失字段，避免覆盖已生成内容。
+    result = dict(objects[0])
+    for extra in objects[1:]:
+        for key, value in extra.items():
+            if key not in result or result[key] in (None, "", [], {}):
+                result[key] = value
+    return result
+
+
+def finalize_agent_result(
+    result: dict[str, Any],
+    context: dict[str, Any],
+    provider: str,
+    model: str,
+    usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cards = result.get("analysis_cards")
+    shots = result.get("shots")
+    if not isinstance(cards, list) or len(cards) != 4 or not isinstance(shots, list) or len(shots) < 1:
+        raise RuntimeError(f"{provider} 返回结构不完整，请重试")
+    required_method_fields = {"composition", "camera", "lighting_color", "blocking", "rhythm"}
+    corpus_ids = {str(item.get("id")) for item in context["corpus_retrieval"]["items"]}
+    if context["has_reference"]:
+        breakdown = result.get("reference_breakdown")
+        required_breakdown_fields = {"summary", "shot_scale_pattern", "composition", "lighting_color", "blocking_performance", "editing_rhythm", "reference_shots", "rhetorical_enhancement"}
+        if not isinstance(breakdown, dict) or not required_breakdown_fields.issubset(breakdown):
+            raise RuntimeError("Agent 未完整拆解对标视频，请重新分析")
+        reference_shots = breakdown.get("reference_shots")
+        required_reference_shot_fields = {"source_time", "visual_blueprint", "subject_layout", "action_timing", "shot_size_camera", "lighting_color", "transition", "target_mapping"}
+        if not isinstance(reference_shots, list) or not reference_shots or any(not isinstance(item, dict) or not required_reference_shot_fields.issubset(item) or any(not str(item[key]).strip() for key in required_reference_shot_fields) for item in reference_shots):
+            raise RuntimeError("Agent 未逐段输出对标视频画面骨架，请重新分析")
+        expected_ranges = {str(item["source_time"]) for item in context["reference_video"].get("segments", [])}
+        returned_ranges = {str(item.get("source_time", "")) for item in reference_shots}
+        if expected_ranges and not expected_ranges.issubset(returned_ranges):
+            raise RuntimeError("Agent 未覆盖对标视频的全部镜头时间段，请重新分析")
+    for shot in shots:
+        method = shot.get("director_method") if isinstance(shot, dict) else None
+        if not isinstance(method, dict) or not required_method_fields.issubset(method) or any(not str(method[key]).strip() for key in required_method_fields):
+            raise RuntimeError("Agent 未完整执行导演方法库，请重新分析")
+        lyrics_sync = shot.get("lyrics_sync") if isinstance(shot, dict) else None
+        required_sync_fields = {"start", "end", "text", "section", "cut_on"}
+        if not isinstance(lyrics_sync, dict) or not required_sync_fields.issubset(lyrics_sync) or any(not str(lyrics_sync[key]).strip() for key in required_sync_fields):
+            raise RuntimeError("Agent 未完整输出歌词时间轴，请重新分析")
+        prompt = str(shot.get("prompt", "")).strip()
+        sync_prefix = f"[歌词时间轴 {str(lyrics_sync['start']).strip()}–{str(lyrics_sync['end']).strip()}｜{str(lyrics_sync['text']).strip()}]"
+        if str(lyrics_sync["text"]).strip() not in prompt or str(lyrics_sync["start"]).strip() not in prompt or str(lyrics_sync["end"]).strip() not in prompt:
+            prompt = f"{sync_prefix} {prompt}".strip()
+        corpus_refs = shot.get("corpus_refs") if isinstance(shot, dict) else None
+        if not isinstance(corpus_refs, list) or len(corpus_refs) < 3 or any(str(item) not in corpus_ids for item in corpus_refs):
+            raise RuntimeError("分镜未引用有效的电影语料检索结果，请重新分析")
+        if any(corpus_id in prompt or corpus_id in str(shot.get("negative_prompt", "")) for corpus_id in corpus_ids):
+            raise RuntimeError("分镜提示词正文不得出现电影语料内部编号，请重新分析")
+        if context["has_reference"]:
+            reference_match = shot.get("reference_match") if isinstance(shot, dict) else None
+            required_match_fields = {"source_time", "visual_blueprint", "subject_layout", "action_timing", "camera_motion", "transition"}
+            if not isinstance(reference_match, dict) or not required_match_fields.issubset(reference_match) or any(not str(reference_match[key]).strip() for key in required_match_fields):
+                raise RuntimeError("分镜未写明对标视频画面复刻约束，请重新分析")
+            source_time = str(reference_match["source_time"]).strip()
+            if source_time not in prompt:
+                prompt = f"[对标源时间段 {source_time}] {prompt}".strip()
+        shot["prompt"] = prompt
+    result["corpus_retrieval"] = context["corpus_retrieval"]
+    result["material_manifest"] = {
+        "song": context["has_song"],
+        "lyrics": context["has_lyrics"],
+        "portrait_count": context["portrait_count"],
+        "reference_video": context["has_reference"],
+        "reference_audio": context["has_reference_audio"],
+    }
+    result["provider"] = provider
+    result["model"] = model
+    result["usage"] = usage or {}
+    return result
+
+
+def dsh_is_available() -> bool:
+    return bool(shutil.which(DSH_COMMAND) or pathlib.Path(DSH_COMMAND).is_file())
+
+
+def call_dsh_headless_agent(
+    context: dict[str, Any],
+    directory: pathlib.Path,
+    files: dict[str, str],
+) -> dict[str, Any]:
+    if not dsh_is_available():
+        raise RuntimeError("DSH Headless 未安装或 DSH_COMMAND 不可执行")
+    DSH_HOME.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "context": context,
+        "files": {key: str((directory / filename).resolve()) for key, filename in files.items()},
+    }
+    manifest_path = directory / "agent-context.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    reference_path = manifest["files"].get("reference", "")
+    task = f"""你是映流 MV 的制作总控 Agent。工作目录是 {directory.resolve()}。
+必须先读取 {manifest_path.resolve()}，只使用其中真实存在的项目物料、导演库索引、电影语料检索结果和歌词时间轴。
+
+执行规则：
+1. 如果存在 reference 文件，必须先调用 video_probe，再调用 video_analyze；video_analyze 显式传 maxFrames=24，重点分析主体数量与轨迹、逐拍动作、构图、景别、机位、推拉摇移跟、光色和切镜。随后只调用一次 video_ask，显式传 maxFrames=12，question 只写“复核整个视频的逐段动作、构图、运镜和切镜”，不要把数字时间写入 question，以确保工具复核完整视频而不是只截取第一个时间窗。最终再按照 context.reference_video.segments 的全部精确时间段逐段组织结果。不要为每段分别调用，避免重复解码与重复上传；不能只看一组抽帧。当前对标视频路径：{reference_path or '未提供'}。
+2. 人物参考图全部同级。使用 read_image 逐张检查人物外貌、服装和身份约束。
+3. 对标视频决定画面几何、动作、运镜和切镜；导演方法和电影语料只能增强光色、质感和叙事，不能覆盖对标结构。
+4. reference_breakdown.reference_shots 必须逐项覆盖 context.reference_video.segments，source_time 必须逐字复制，不能漏段。
+5. 每条 shots.prompt 必须以对应时间轴和歌词开头，并写入 reference_match.source_time；不得出现导演姓名、电影语料编号、字幕或水印。
+6. 每镜 corpus_refs 至少选择 3 个 context.corpus_retrieval.items 中真实存在的 id，但这些 id 只能出现在 corpus_refs 元数据。
+7. 不要修改、删除或移动用户文件，不要发起视频生成。
+
+最终只输出一个合法 JSON 对象，不要 Markdown、解释或第二个 JSON。必须包含：
+project_summary, creative_brief,
+analysis_cards（正好4项，每项含 title/value/copy），
+timeline（每项含 time/label），material_observations，
+reference_breakdown（summary/shot_scale_pattern/composition/lighting_color/blocking_performance/editing_rhythm/reference_shots/rhetorical_enhancement），
+director_application，shots。
+每个 reference_shots 项必须含 source_time/visual_blueprint/subject_layout/action_timing/shot_size_camera/lighting_color/transition/target_mapping。
+每个 shots 项必须含 id/time/title/lyrics_window、lyrics_sync（start/end/text/section/cut_on）、corpus_refs、reference_match（source_time/visual_blueprint/subject_layout/action_timing/camera_motion/transition）、director_method（composition/camera/lighting_color/blocking/rhythm）、prompt、negative_prompt。
+shots 必须覆盖完整规划时长，且每条 prompt 都必须独立完整。
+"""
+    environment = os.environ.copy()
+    environment["DSH_HOME"] = str(DSH_HOME)
+    environment["HOME"] = str(DSH_HOME)
+    environment.setdefault("VIDEO_LENS_API_KEY", DEEPSEEK_API_KEY)
+    completed = subprocess.run(
+        [DSH_COMMAND, "--profile", "headless", "-"],
+        input=task,
+        cwd=directory,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=DSH_TIMEOUT_SECONDS,
+        check=False,
+    )
+    (directory / "agent-dsh-stdout.txt").write_text(completed.stdout or "", encoding="utf-8")
+    (directory / "agent-dsh-stderr.txt").write_text(completed.stderr or "", encoding="utf-8")
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "未知错误").strip()[-2000:]
+        raise RuntimeError(f"DSH Headless 调用失败：{detail}")
+    result = parse_agent_json(completed.stdout)
+    return finalize_agent_result(result, context, "DSH Headless", DEEPSEEK_MODEL)
+
+
 def call_deepseek_agent(context: dict[str, Any], image_inputs: list[dict[str, str]]) -> dict[str, Any]:
     if not DEEPSEEK_API_KEY:
         raise RuntimeError("DeepSeek Agent 未配置")
@@ -1409,7 +1634,7 @@ def call_deepseek_agent(context: dict[str, Any], image_inputs: list[dict[str, st
     "negative_prompt":"字幕、水印、畸形肢体、面部漂移等具体负面约束"
   }]
 }
-analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物参考图、对标视频与镜头策略。提供对标视频时，必须结合全部抽帧时间和 FFmpeg 切点生成逐段 reference_shots，不能只概括风格或只描述第一帧；每个生成镜头都必须用 reference_match 指向具体对标时间段，并把画面布局、人物位置、动作节拍、景别、机位、运镜与切镜写进 prompt。对标视频优先决定“画面怎么摆、人物怎么动、镜头怎么走、何时切”，导演库和电影语料在不改变这些关键约束的前提下负责修辞与质感增强。shots 数量必须根据本次真实音频时长、歌词结构、对标视频切点和节奏动态决定并覆盖完整音频，不得固定为 6 项。必须严格依据输入的结构化歌词时间轴划分镜头，不得改写、遗漏或编造歌词；跨越多句歌词的镜头要把该时间窗内所有歌词写入 lyrics_sync.text 和 prompt。纯音乐段必须明确写“纯音乐”。每条 prompt 必须独立完整，不得写“同上”。每个 director_method 的五项都必须是针对该镜头的具体执行方案，不能复述语料原文。每镜的 corpus_refs 必须从检索结果的 id 中选择，至少引用 3 项，且引用必须与本镜实际执行内容一致；corpus_refs 只允许出现在 JSON 元数据字段，prompt 和 negative_prompt 正文严禁出现任何语料 ID。参考图没有主次之分。"""
+analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物参考图、对标视频与镜头策略。提供对标视频时，必须为输入 reference_video.segments 的每一个区间生成且只生成一个 reference_shots 项，source_time 必须逐字复制对应区间，不能漏段、合并、改写时间或只概括风格；每张四联关键帧必须从左到右比较并写出段内动作与镜头变化。每个生成镜头都必须用 reference_match 指向其中一个真实对标时间段，并把画面布局、人物位置、动作节拍、景别、机位、运镜与切镜写进 prompt。对标视频优先决定“画面怎么摆、人物怎么动、镜头怎么走、何时切”，导演库和电影语料在不改变这些关键约束的前提下负责修辞与质感增强。shots 数量必须根据本次真实音频时长、歌词结构、对标视频切点和节奏动态决定并覆盖完整音频，不得固定为 6 项。必须严格依据输入的结构化歌词时间轴划分镜头，不得改写、遗漏或编造歌词；跨越多句歌词的镜头要把该时间窗内所有歌词写入 lyrics_sync.text 和 prompt。纯音乐段必须明确写“纯音乐”。每条 prompt 必须独立完整，不得写“同上”。每个 director_method 的五项都必须是针对该镜头的具体执行方案，不能复述语料原文。每镜的 corpus_refs 必须从检索结果的 id 中选择，至少引用 3 项，且引用必须与本镜实际执行内容一致；corpus_refs 只允许出现在 JSON 元数据字段，prompt 和 negative_prompt 正文严禁出现任何语料 ID。参考图没有主次之分。"""
     user_text = (
         "请根据以下真实项目上下文输出 JSON：\n"
         f"项目名称：{context['title']}\n"
@@ -1465,57 +1690,14 @@ analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物�
     content = api_payload.get("choices", [{}])[0].get("message", {}).get("content", "")
     if not content:
         raise RuntimeError("DeepSeek 返回了空结果")
-    result = json.loads(content)
-    cards = result.get("analysis_cards")
-    shots = result.get("shots")
-    if not isinstance(cards, list) or len(cards) != 4 or not isinstance(shots, list) or len(shots) < 1:
-        raise RuntimeError("DeepSeek 返回结构不完整，请重试")
-    required_method_fields = {"composition", "camera", "lighting_color", "blocking", "rhythm"}
-    corpus_ids = {str(item.get("id")) for item in context["corpus_retrieval"]["items"]}
-    if context["has_reference"]:
-        breakdown = result.get("reference_breakdown")
-        required_breakdown_fields = {"summary", "shot_scale_pattern", "composition", "lighting_color", "blocking_performance", "editing_rhythm", "reference_shots", "rhetorical_enhancement"}
-        if not isinstance(breakdown, dict) or not required_breakdown_fields.issubset(breakdown):
-            raise RuntimeError("Agent 未完整拆解对标视频，请重新分析")
-        reference_shots = breakdown.get("reference_shots")
-        required_reference_shot_fields = {"source_time", "visual_blueprint", "subject_layout", "action_timing", "shot_size_camera", "lighting_color", "transition", "target_mapping"}
-        if not isinstance(reference_shots, list) or not reference_shots or any(not isinstance(item, dict) or not required_reference_shot_fields.issubset(item) or any(not str(item[key]).strip() for key in required_reference_shot_fields) for item in reference_shots):
-            raise RuntimeError("Agent 未逐段输出对标视频画面骨架，请重新分析")
-    for shot in shots:
-        method = shot.get("director_method") if isinstance(shot, dict) else None
-        if not isinstance(method, dict) or not required_method_fields.issubset(method) or any(not str(method[key]).strip() for key in required_method_fields):
-            raise RuntimeError("DeepSeek 未完整执行导演方法库，请重新分析")
-        lyrics_sync = shot.get("lyrics_sync") if isinstance(shot, dict) else None
-        required_sync_fields = {"start", "end", "text", "section", "cut_on"}
-        if not isinstance(lyrics_sync, dict) or not required_sync_fields.issubset(lyrics_sync) or any(not str(lyrics_sync[key]).strip() for key in required_sync_fields):
-            raise RuntimeError("DeepSeek 未完整输出歌词时间轴，请重新分析")
-        prompt = str(shot.get("prompt", ""))
-        if str(lyrics_sync["text"]).strip() not in prompt or str(lyrics_sync["start"]).strip() not in prompt or str(lyrics_sync["end"]).strip() not in prompt:
-            raise RuntimeError("分镜提示词未写入对应歌词和起止时间，请重新分析")
-        corpus_refs = shot.get("corpus_refs") if isinstance(shot, dict) else None
-        if not isinstance(corpus_refs, list) or len(corpus_refs) < 3 or any(str(item) not in corpus_ids for item in corpus_refs):
-            raise RuntimeError("分镜未引用有效的电影语料检索结果，请重新分析")
-        if any(corpus_id in prompt or corpus_id in str(shot.get("negative_prompt", "")) for corpus_id in corpus_ids):
-            raise RuntimeError("分镜提示词正文不得出现电影语料内部编号，请重新分析")
-        if context["has_reference"]:
-            reference_match = shot.get("reference_match") if isinstance(shot, dict) else None
-            required_match_fields = {"source_time", "visual_blueprint", "subject_layout", "action_timing", "camera_motion", "transition"}
-            if not isinstance(reference_match, dict) or not required_match_fields.issubset(reference_match) or any(not str(reference_match[key]).strip() for key in required_match_fields):
-                raise RuntimeError("分镜未写明对标视频画面复刻约束，请重新分析")
-            if str(reference_match["source_time"]).strip() not in prompt:
-                raise RuntimeError("分镜提示词未写入对应的对标视频时间段，请重新分析")
-    result["corpus_retrieval"] = context["corpus_retrieval"]
-    result["material_manifest"] = {
-        "song": context["has_song"],
-        "lyrics": context["has_lyrics"],
-        "portrait_count": context["portrait_count"],
-        "reference_video": context["has_reference"],
-        "reference_audio": context["has_reference_audio"],
-    }
-    result["provider"] = "DeepSeek"
-    result["model"] = api_payload.get("model", DEEPSEEK_MODEL)
-    result["usage"] = api_payload.get("usage", {})
-    return result
+    result = parse_agent_json(content)
+    return finalize_agent_result(
+        result,
+        context,
+        "DeepSeek Direct (fallback)",
+        str(api_payload.get("model", DEEPSEEK_MODEL)),
+        api_payload.get("usage", {}),
+    )
 
 
 def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
@@ -1542,32 +1724,43 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
         else:
             duration = float(model_spec["max_duration"])
         image_inputs: list[dict[str, str]] = []
+        needs_direct_fallback_inputs = DSH_AGENT_MODE != "required"
         portrait_keys = [key for key in ALLOWED_EXTENSIONS if key.startswith("portrait") and key in files]
-        for index, key in enumerate(portrait_keys):
-            image_inputs.append({
-                "label": f"人物参考图 {index + 1}/{len(portrait_keys)}（全部参考图同级）",
-                "url": image_data_url(directory / files[key], directory / f"agent-portrait-{index + 1}.jpg"),
-            })
+        if needs_direct_fallback_inputs:
+            for index, key in enumerate(portrait_keys):
+                image_inputs.append({
+                    "label": f"人物参考图 {index + 1}/{len(portrait_keys)}（全部参考图同级）",
+                    "url": image_data_url(directory / files[key], directory / f"agent-portrait-{index + 1}.jpg"),
+                })
         reference_video: dict[str, Any] = {"provided": False}
         if "reference" in files:
             try:
                 reference_path = directory / files["reference"]
                 reference_duration = probe_duration(reference_path, limit=None)
                 scene_cuts = detect_reference_scene_cuts(reference_path, reference_duration)
-                sample_times = reference_sample_times(reference_duration, scene_cuts)
+                segments = reference_scene_segments(reference_duration, scene_cuts)
                 reference_video = {
                     "provided": True,
                     "duration_seconds": round(reference_duration, 3),
                     "scene_cut_times": [format_timestamp(value) for value in scene_cuts],
                     "estimated_shots": len(scene_cuts) + 1,
-                    "sample_times": [format_timestamp(value) for value in sample_times],
-                    "instruction": "把对标视频作为权威画面骨架，按时间顺序比较全部抽帧与切点；逐段记录具体画面、主体数量和位置、前中后景、动作节拍、景别、机位、运镜方向与切镜。生成方案尽量复刻这些结构，只替换用户人物、服装、场景语义、文字和品牌元素；导演库与电影语料仅负责修辞增强。",
+                    "segments": segments,
+                    "instruction": "每张图是一个时间段内按从左到右排列的 4 帧连续关键帧。必须逐段比较主体位移、肢体动作、构图变化、景别变化和镜头运动，并一一输出对应 reference_shots。把对标视频作为权威画面骨架，只替换用户人物、服装、场景语义、文字和品牌元素；导演库与电影语料仅负责修辞增强。",
                 }
-                for index, timestamp in enumerate(sample_times):
-                    image_inputs.append({
-                        "label": f"对标视频抽帧 {index + 1}/{len(sample_times)}，时间点 {format_timestamp(timestamp)}",
-                        "url": reference_frame_data_url(reference_path, directory / f"agent-reference-{index + 1}.jpg", timestamp),
-                    })
+                if needs_direct_fallback_inputs:
+                    for segment in segments:
+                        image_inputs.append({
+                            "label": (
+                                f"对标视频镜头段 {segment['index']}/{len(segments)}，"
+                                f"原片时间 {segment['source_time']}；下图从左到右为该段的 4 帧连续关键帧"
+                            ),
+                            "url": reference_contact_sheet_data_url(
+                                reference_path,
+                                directory / f"agent-reference-segment-{segment['index']}.jpg",
+                                float(segment["start_seconds"]),
+                                float(segment["end_seconds"]),
+                            ),
+                        })
             except (subprocess.SubprocessError, OSError, ValueError) as exc:
                 raise RuntimeError(f"对标视频拆解失败：{exc}") from exc
         director = str(form.getfirst("director", "王家卫"))[:60]
@@ -1598,6 +1791,15 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
             "lyrics": lyrics,
             "lyric_timeline": build_lyric_timeline(lyrics, duration),
         }
+        if DSH_AGENT_MODE in {"required", "auto"}:
+            try:
+                return call_dsh_headless_agent(context, directory, files)
+            except Exception as exc:
+                if DSH_AGENT_MODE == "required":
+                    raise
+                fallback = call_deepseek_agent(context, image_inputs)
+                fallback["agent_fallback_reason"] = str(exc)[:1000]
+                return fallback
         return call_deepseek_agent(context, image_inputs)
     finally:
         shutil.rmtree(directory, ignore_errors=True)
@@ -1701,6 +1903,8 @@ class Handler(BaseHTTPRequestHandler):
                     "minimax": bool(MINIMAX_API_KEY),
                     "image": bool(IMAGE_API_KEY),
                     "deepseek": bool(DEEPSEEK_API_KEY),
+                    "dsh_headless": dsh_is_available(),
+                    "dsh_agent_mode": DSH_AGENT_MODE,
                 },
             })
             return

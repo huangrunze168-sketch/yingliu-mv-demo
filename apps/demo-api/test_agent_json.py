@@ -1,0 +1,96 @@
+import importlib.util
+import pathlib
+import tempfile
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+
+SERVER_PATH = pathlib.Path(__file__).with_name("server.py")
+SPEC = importlib.util.spec_from_file_location("yingliu_demo_server_agent_json", SERVER_PATH)
+assert SPEC and SPEC.loader
+server = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(server)
+
+
+class AgentJsonParserTests(unittest.TestCase):
+    def test_parses_plain_json(self) -> None:
+        self.assertEqual(server.parse_agent_json('{"shots": [{"id": "SH01"}]}')["shots"][0]["id"], "SH01")
+
+    def test_parses_markdown_fence_and_trailing_text(self) -> None:
+        content = '```json\n{"project_summary": "完成"}\n```\n以上为结果。'
+        self.assertEqual(server.parse_agent_json(content)["project_summary"], "完成")
+
+    def test_parses_json_with_braces_inside_string(self) -> None:
+        content = '{"creative_brief": "画面包含 {门框}，但仍是合法字符串"} trailing'
+        self.assertEqual(server.parse_agent_json(content)["creative_brief"], "画面包含 {门框}，但仍是合法字符串")
+
+    def test_merges_only_missing_fields_from_concatenated_objects(self) -> None:
+        content = '{"project_summary":"主结果","shots":[]}\n{"project_summary":"不得覆盖","shots":[{"id":"SH01"}],"timeline":[]}'
+        result = server.parse_agent_json(content)
+        self.assertEqual(result["project_summary"], "主结果")
+        self.assertEqual(result["shots"][0]["id"], "SH01")
+        self.assertEqual(result["timeline"], [])
+
+    def test_rejects_non_json_output(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "不是合法 JSON"):
+            server.parse_agent_json("模型暂时无法处理")
+
+    def test_reference_segments_cover_full_duration(self) -> None:
+        segments = server.reference_scene_segments(12.0, [2.0, 5.5, 9.0])
+        self.assertEqual([item["source_time"] for item in segments], [
+            "00:00.000–00:02.000",
+            "00:02.000–00:05.500",
+            "00:05.500–00:09.000",
+            "00:09.000–00:12.000",
+        ])
+
+    def test_reference_segments_merge_without_gaps(self) -> None:
+        cuts = [float(index) for index in range(1, 20)]
+        segments = server.reference_scene_segments(20.0, cuts, limit=4)
+        self.assertEqual(len(segments), 4)
+        self.assertEqual(segments[0]["start_seconds"], 0.0)
+        self.assertEqual(segments[-1]["end_seconds"], 20.0)
+        for current, following in zip(segments, segments[1:]):
+            self.assertEqual(current["end_seconds"], following["start_seconds"])
+
+    def test_dsh_headless_receives_workspace_and_video_tool_instructions(self) -> None:
+        context = {
+            "title": "测试",
+            "has_reference": True,
+            "has_song": False,
+            "has_lyrics": False,
+            "has_reference_audio": False,
+            "portrait_count": 0,
+            "reference_video": {"segments": [{"source_time": "00:00.000–00:03.000"}]},
+            "corpus_retrieval": {"items": [{"id": "film-1"}]},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = pathlib.Path(temporary)
+            (directory / "reference.mp4").write_bytes(b"video")
+            completed = SimpleNamespace(returncode=0, stdout='{"project_summary":"完成"}', stderr="")
+            with patch.object(server, "dsh_is_available", return_value=True), \
+                 patch.object(server.subprocess, "run", return_value=completed) as run, \
+                 patch.object(server, "finalize_agent_result", return_value={"provider": "DSH Headless"}):
+                result = server.call_dsh_headless_agent(context, directory, {"reference": "reference.mp4"})
+
+            self.assertEqual(result["provider"], "DSH Headless")
+            arguments = run.call_args.args[0]
+            self.assertEqual(arguments[1:4], ["--profile", "headless", "-"])
+            self.assertEqual(run.call_args.kwargs["cwd"], directory)
+            task = run.call_args.kwargs["input"]
+            self.assertIn("video_probe", task)
+            self.assertIn("video_analyze", task)
+            self.assertIn("video_ask", task)
+            self.assertIn("只调用一次 video_ask", task)
+            self.assertIn("video_analyze 显式传 maxFrames=24", task)
+            self.assertIn("video_ask，显式传 maxFrames=12", task)
+            self.assertIn("不要把数字时间写入 question", task)
+            manifest = (directory / "agent-context.json").read_text(encoding="utf-8")
+            self.assertIn(str((directory / "reference.mp4").resolve()), manifest)
+            self.assertEqual((directory / "agent-dsh-stdout.txt").read_text(encoding="utf-8"), completed.stdout)
+            self.assertEqual((directory / "agent-dsh-stderr.txt").read_text(encoding="utf-8"), completed.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

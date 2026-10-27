@@ -1,0 +1,15 @@
+# 映流 MV 的 DSH Headless 生产配置。
+# 此文件覆盖 dsh-video-lens 的默认 SiliconFlow 路由，统一使用现有 DeepSeek 视觉接口。
+- id: video-lens
+  config:
+    visionBaseUrl: https://api.deepseek.com
+    visionModel: deepseek-flash
+    visionApiKeyEnv: VIDEO_LENS_API_KEY
+    maxFrames: 24
+    frameMaxWidth: 768
+    frameQuality: 4
+    sceneThreshold: 8
+    askPaddingSec: 2
+    vlmMaxTokens: 3000
+    vlmTimeoutMs: 240000
+    asrTimeoutMs: 120000

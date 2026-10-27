@@ -8,7 +8,12 @@ Type=simple
 User=yingliu-demo
 Group=yingliu-demo
 Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=YINGLIU_DEMO_DATA=/var/lib/yingliu-demo/jobs
+Environment=DSH_AGENT_MODE=required
+Environment=DSH_COMMAND=/usr/local/bin/dsh
+Environment=DSH_HOME=/var/lib/yingliu-demo/dsh
+Environment=DSH_TIMEOUT_SECONDS=900
 EnvironmentFile=-/etc/yingliu-demo-api.env
 ExecStart=/usr/bin/python3 /opt/yingliu-demo-api/server.py
 Restart=on-failure

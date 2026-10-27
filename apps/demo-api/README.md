@@ -1,7 +1,8 @@
 # 映流 MV 可运行 Demo API
 
 公开 Demo 的生成与项目后端。接收音频、歌词、多张人物参考图和可选参考素材，调用
-DeepSeek 完成 Agent 分析，并按 ModelsNexus 文档提交 Seedance 或 MiniMax 视频任务。
+DSH Headless 作为 Agent 主后端，调用 `dsh-video-lens` 读取本地视频、逐张检查人物图，
+再结合导演方法库与电影语料生成提示词；随后按 ModelsNexus 文档提交 Seedance 或 MiniMax 视频任务。
 Seedance 直接交付模型结果；MiniMax 单段上限 15 秒，长视频由 FFmpeg 分段合成并封装原音轨。
 任务文件默认保留 24 小时。
 
@@ -10,16 +11,21 @@ Seedance 直接交付模型结果；MiniMax 单段上限 15 秒，长视频由 F
 - `GET /health`
 - `GET/POST /projects`
 - `PATCH/DELETE /projects/{id}`
-- `POST /analyze`：DeepSeek Agent 分析与逐镜提示词
+- `POST /analyze`：DSH Headless 分析真实物料并生成逐镜提示词
 - `POST /jobs`：`multipart/form-data`
 - `GET /jobs/{id}`
 
 `POST /jobs` 接受 `client_request_id`，同一请求标识只会创建一次服务端任务和上游任务。
 前端进入交付页不会自动调用付费模型，必须由用户主动点击生成。
 
-运行环境需要 Python 3.11+、FFmpeg 7+、`ffprobe`，以及可用的
+运行环境需要 Python 3.11+、Node.js 22+、DSH Headless、FFmpeg 7+、`ffprobe`，以及可用的
 `libopenh264` 编码器和运行库。生产服务默认监听 `127.0.0.1:8791`，通过
 `xiaoyou.conf` 暴露 `/yingliu-demo-api/` 和 `/yingliu-demo-results/`。
+
+DSH 的 `headless` profile 必须包含 `@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-headless`
+和固定版本的 `dsh-video-lens`。把 `dsh-headless.cordis.patch.yml` 复制为该 profile 的
+`cordis.patch.yml`，并配置 `DSH_HOME`、`DSH_COMMAND` 与 `VIDEO_LENS_API_KEY`。生产环境使用
+`DSH_AGENT_MODE=required`，因此 DSH 或视频工具失败时会明确报错，不会静默伪装成已分析。
 
 外部模型凭证通过 `/etc/yingliu-demo-api.env` 注入，严禁写入前端产物。完整配置见
 `.env.example`。`YINGLIU_DEMO_PUBLIC_API_BASE` 必须是 ModelsNexus 可以访问、使用受信任
