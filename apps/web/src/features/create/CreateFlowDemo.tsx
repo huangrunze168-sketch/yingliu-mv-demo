@@ -121,7 +121,7 @@ const assetConfig: Array<{ key: AssetKey; title: string; copy: string; accept: s
   { key: 'song', title: '原始音频', copy: '可选；上传后作为整支 MV 的时间基准', accept: 'audio/*', required: false, tag: 'MP3 · WAV · FLAC' },
   { key: 'lyrics', title: '歌词文件', copy: '可选；上传后用于逐句对齐、口型与切点', accept: '.txt,.lrc,text/plain', required: false, tag: 'TXT · LRC' },
   { key: 'portrait', title: '人物参考图', copy: '可选；支持多张，用于补充正脸、侧脸、全身和服装', accept: 'image/*', required: false, tag: '最多 8 张' },
-  { key: 'reference', title: '参考视频', copy: '可选，用于提取镜头语言与视觉节奏', accept: 'video/*', required: false, tag: 'MP4 · MOV' },
+  { key: 'reference', title: '参考视频 / 音频', copy: '可选；系统按真实媒体流识别，视频用于拆镜，音频自动转 WAV', accept: 'video/*,audio/*', required: false, tag: '视频 · 音频' },
   { key: 'voice', title: '参考音色', copy: '可选，用于生成新演唱音轨', accept: 'audio/*', required: false, tag: 'MP3 · WAV' },
 ];
 
@@ -239,6 +239,8 @@ export function CreateFlowDemo() {
     () => assetConfig.filter(item => item.required).every(item => item.key === 'portrait' ? assets.portrait.length > 0 : Boolean(assets[item.key])),
     [assets],
   );
+  const referenceIsAudio = Boolean(assets.reference && (assets.reference.type.startsWith('audio/') || /\.(mp3|wav|flac|m4a|aac|ogg|opus|ape|wma|aiff?|caf)$/i.test(assets.reference.name)));
+  const referenceIsVideo = Boolean(assets.reference && !referenceIsAudio);
 
   const visibleProjects = useMemo(() => {
     const keyword = projectSearch.trim().toLocaleLowerCase('zh-CN');
@@ -505,7 +507,7 @@ export function CreateFlowDemo() {
       setNotice('当前是语料检索上线前生成的旧分镜，请返回第一步重新执行 Agent 分析。');
       return;
     }
-    if (activeStep === 1 && assets.reference && !agentAnalysis?.reference_breakdown?.reference_shots?.length) {
+    if (activeStep === 1 && referenceIsVideo && !agentAnalysis?.reference_breakdown?.reference_shots?.length) {
       setNotice('当前分镜没有逐段复刻对标视频的画面骨架，请返回第一步重新执行 Agent 分析。');
       return;
     }
@@ -593,7 +595,7 @@ export function CreateFlowDemo() {
   const corpusItems = agentAnalysis?.corpus_retrieval?.items ?? [];
   const corpusById = useMemo(() => new Map(corpusItems.map(item => [item.id, item])), [corpusItems]);
   const corpusReady = corpusItems.length > 0;
-  const referenceBlueprintReady = !assets.reference || Boolean(agentAnalysis?.reference_breakdown?.reference_shots?.length);
+  const referenceBlueprintReady = !referenceIsVideo || Boolean(agentAnalysis?.reference_breakdown?.reference_shots?.length);
 
   if (pageView === 'projects') {
     return (
@@ -757,7 +759,7 @@ export function CreateFlowDemo() {
           <section className="mv-agent-running" aria-live="polite">
             <header><div><span>✦</span><div><p className="overline">DEEPSEEK PRODUCTION AGENT</p><h2>{agentAnalyzing ? 'Agent 正在真实分析项目' : 'Agent 调用未完成'}</h2></div></div><strong>{agentAnalyzing ? 'API 处理中' : '需要重试'}</strong></header>
             <div className={`mv-agent-running-bar ${agentAnalyzing ? 'is-indeterminate' : 'is-error'}`}><span /></div>
-            <p>{agentAnalyzing ? `素材已提交后端。DeepSeek 正在读取真实歌词、音频时长、${assets.portrait.length} 张同级参考图${assets.reference ? '及参考片抽帧' : ''}，并应用 ${director} 导演方法。` : agentAnalysisError}</p>
+            <p>{agentAnalyzing ? `素材已提交后端。DeepSeek 正在读取真实歌词、音频时长、${assets.portrait.length} 张同级参考图${referenceIsVideo ? '及参考片抽帧' : referenceIsAudio ? '及自动标准化的参考音频' : ''}，并应用 ${director} 导演方法。` : agentAnalysisError}</p>
             <div className="mv-agent-running-steps">{agentAnalysisStages.map(([title, copy], index) => <article className={agentAnalyzing ? index === 0 ? 'is-done' : 'is-active' : index === 0 ? 'is-done' : ''} key={title}><span>{index === 0 ? '✓' : `0${index + 1}`}</span><div><b>{title}</b><small>{copy}</small></div><em>{index === 0 ? '已提交' : agentAnalyzing ? 'DeepSeek 处理中' : '未完成'}</em></article>)}</div>
             <footer>{agentAnalyzing ? <><span className="mv-agent-pulse" /> 正在等待 DeepSeek 返回结构化分析和逐镜提示词</> : <button className="button button-primary" type="button" onClick={() => void runAgentAnalysis()}>重新调用 Agent</button>}</footer>
           </section>

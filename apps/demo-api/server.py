@@ -515,7 +515,7 @@ def seedance_media_type(key: str) -> str:
         return "image"
     if key == "reference":
         return "video"
-    if key in {"song", "voice"}:
+    if key in {"song", "voice", "reference_audio"}:
         return "audio"
     raise ValueError(f"不支持的 Seedance 素材类型：{key}")
 
@@ -893,10 +893,10 @@ def legacy_render_job(job_id: str) -> None:
 def save_upload(field: cgi.FieldStorage, directory: pathlib.Path, key: str) -> str:
     original_name = pathlib.Path(field.filename or "upload").name
     extension = pathlib.Path(original_name).suffix.lower()
-    if extension not in ALLOWED_EXTENSIONS[key] and key not in {"song", "voice"}:
+    if extension not in ALLOWED_EXTENSIONS[key] and key not in {"song", "voice", "reference"}:
         raise ValueError(f"{key} 文件格式不支持：{original_name}")
-    if key in {"song", "voice"} and not re.fullmatch(r"\.[a-z0-9]{1,10}", extension):
-        extension = ".audio"
+    if key in {"song", "voice", "reference"} and not re.fullmatch(r"\.[a-z0-9]{1,10}", extension):
+        extension = ".media"
     filename = f"{key}{extension}"
     target = directory / filename
     with target.open("wb") as handle:
@@ -912,14 +912,7 @@ def normalize_audio_upload(directory: pathlib.Path, files: dict[str, str], key: 
     if not filename:
         return
     source = directory / filename
-    if source.suffix.lower() == ".wav":
-        # 仍执行探测，避免仅改名为 WAV 的无效文件绕过校验。
-        try:
-            probe_duration(source, limit=None)
-        except (subprocess.SubprocessError, OSError, ValueError) as exc:
-            raise ValueError(f"{key} 不是可读取的音频文件") from exc
-        return
-    output = directory / f"{key}.wav"
+    output = directory / f"{key}-normalized.wav"
     try:
         subprocess.run([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
@@ -929,8 +922,33 @@ def normalize_audio_upload(directory: pathlib.Path, files: dict[str, str], key: 
     except (subprocess.SubprocessError, OSError, ValueError) as exc:
         output.unlink(missing_ok=True)
         raise ValueError(f"{key} 不是 FFmpeg 可读取的音频文件") from exc
+    final_output = directory / f"{key}.wav"
     source.unlink(missing_ok=True)
-    files[key] = output.name
+    output.replace(final_output)
+    files[key] = final_output.name
+
+
+def classify_reference_upload(directory: pathlib.Path, files: dict[str, str]) -> None:
+    """参考入口允许音频或视频，并以 FFprobe 的真实媒体流为准。"""
+    filename = files.get("reference")
+    if not filename:
+        return
+    source = directory / filename
+    try:
+        completed = subprocess.run([
+            "ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "json", str(source),
+        ], check=True, capture_output=True, text=True, timeout=120)
+        payload = json.loads(completed.stdout or "{}")
+        stream_types = {str(item.get("codec_type")) for item in payload.get("streams", []) if isinstance(item, dict)}
+    except (subprocess.SubprocessError, OSError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("reference 不是 FFmpeg 可读取的音频或视频文件") from exc
+    if "video" in stream_types:
+        return
+    if "audio" in stream_types:
+        files.pop("reference", None)
+        files["reference_audio"] = filename
+        return
+    raise ValueError("reference 文件中没有可读取的音频或视频流")
 
 
 def read_lyrics(path: pathlib.Path) -> str:
@@ -1079,6 +1097,7 @@ analysis_cards 必须正好 4 项，分别覆盖需求、歌曲歌词、人物�
         f"本次规划时长：{context['duration']:.2f} 秒\n"
         f"人物参考图数量：{context['portrait_count']}，已提供的参考图全部同级；为 0 时不得编造人物外貌\n"
         f"参考视频：{'已提供，附带抽帧' if context['has_reference'] else '未提供'}\n"
+        f"参考音频：{'已提供并统一转为 WAV' if context['has_reference_audio'] else '未提供'}\n"
         f"对标视频技术拆解上下文：{json.dumps(context['reference_video'], ensure_ascii=False)}\n"
         f"结构化歌词时间轴（镜头必须与此对齐）：{json.dumps(context['lyric_timeline'], ensure_ascii=False)}\n"
         f"歌词原文：\n{context['lyrics']}"
@@ -1172,8 +1191,10 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
         for key in ALLOWED_EXTENSIONS:
             if key in form and getattr(form[key], "filename", None):
                 files[key] = save_upload(form[key], directory, key)
+        classify_reference_upload(directory, files)
         normalize_audio_upload(directory, files, "song")
         normalize_audio_upload(directory, files, "voice")
+        normalize_audio_upload(directory, files, "reference_audio")
         model_name = str(form.getfirst("model", "sd2.5海外版-720p"))[:100]
         model_spec = SEEDANCE_MODEL_SPECS.get(model_name) or MINIMAX_MODEL_SPECS.get(model_name) or {"max_duration": 15}
         if "song" in files:
@@ -1233,6 +1254,7 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
             "portrait_count": len(portrait_keys),
             "has_song": "song" in files,
             "has_lyrics": "lyrics" in files,
+            "has_reference_audio": "reference_audio" in files or "voice" in files,
             "has_reference": "reference" in files,
             "reference_video": reference_video,
             "lyrics": lyrics,
@@ -1420,8 +1442,10 @@ class Handler(BaseHTTPRequestHandler):
                 for key in ALLOWED_EXTENSIONS:
                     if key in form and getattr(form[key], "filename", None):
                         files[key] = save_upload(form[key], directory, key)
+                classify_reference_upload(directory, files)
                 normalize_audio_upload(directory, files, "song")
                 normalize_audio_upload(directory, files, "voice")
+                normalize_audio_upload(directory, files, "reference_audio")
                 now = int(time.time())
                 generation_plan_raw = str(form.getfirst("generation_plan", "")).strip()
                 generation_plan = json.loads(generation_plan_raw) if generation_plan_raw else None
