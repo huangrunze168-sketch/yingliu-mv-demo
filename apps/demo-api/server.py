@@ -712,9 +712,7 @@ def generate_upstream_job(job_id: str) -> None:
             requested_duration = round(duration)
             if requested_duration < spec["min_duration"] or requested_duration > spec["max_duration"]:
                 raise ValueError(f"{model} 官方时长范围是 {spec['min_duration']}–{spec['max_duration']} 秒，当前音频 {duration:.2f} 秒")
-            reference_images: list[str] = []
-            reference_videos: list[str] = []
-            reference_audios: list[str] = []
+            content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
             write_state(job_id, stage="正在创建 ModelsNexus 可拉取的短时素材链接", progress=16)
             for key, filename in files.items():
                 if key == "lyrics":
@@ -728,16 +726,21 @@ def generate_upstream_job(job_id: str) -> None:
                 uri = create_signed_asset_url(job_id, key, path)
                 media_type = seedance_media_type(key)
                 if media_type == "image":
-                    reference_images.append(uri)
+                    content.append({
+                        "type": "image_url", "image_url": {"url": uri}, "role": "reference_image",
+                    })
                 elif media_type == "video":
-                    reference_videos.append(uri)
+                    content.append({
+                        "type": "video_url", "video_url": {"url": uri}, "role": "reference_video",
+                    })
                 else:
-                    reference_audios.append(uri)
+                    content.append({
+                        "type": "audio_url", "audio_url": {"url": uri}, "role": "reference_audio",
+                    })
             payload = {
-                "model": model, "prompt": prompt, "duration": requested_duration,
+                "model": model, "content": content, "duration": requested_duration,
                 "resolution": spec["resolution"], "ratio": ratio,
-                "referenceImages": reference_images, "referenceVideos": reference_videos,
-                "referenceAudios": reference_audios, "generate_audio": True,
+                "generate_audio": True, "output_format": "mp4", "watermark": False,
                 "omni_reference_task_type": "reference",
             }
             upstream_id = submit_video_task(job_id, "seedance", payload, MODELSNEXUS_API_KEY)
