@@ -2,7 +2,6 @@
 
 一个可运行的 Web Demo：用户创建项目并上传歌曲、歌词、人物参考图和可选参考视频；DeepSeek Agent 分析物料，结合 ZY 导演库生成逐镜全能提示词；用户确认后，通过 ModelsNexus 调用 Seedance 或 MiniMax，最后在线播放或下载成片。
 
-线上 Demo：<http://43.134.68.104/yingliu-demo/>
 
 ## 当前工作流
 
