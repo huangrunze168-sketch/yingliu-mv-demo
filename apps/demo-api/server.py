@@ -668,7 +668,18 @@ def encode_multipart(fields: dict[str, str], file_field: tuple[str, pathlib.Path
 
 
 class UpstreamHTTPError(RuntimeError):
-    """已收到 ModelsNexus HTTP 响应，确认本次请求已结束。"""
+    """ModelsNexus 返回了 HTTP 错误；4xx 可确认拒绝，5xx 的提交结果可能未知。"""
+
+    def __init__(self, status_code: int, detail: str, request_id: str = "") -> None:
+        self.status_code = status_code
+        self.detail = detail
+        self.request_id = request_id
+        suffix = f"；请求 ID：{request_id}" if request_id else ""
+        super().__init__(f"上游视频 API 请求失败（HTTP {status_code}）：{detail}{suffix}")
+
+    @property
+    def submission_is_definitively_rejected(self) -> bool:
+        return 400 <= self.status_code < 500
 
 
 class UpstreamTransportError(Exception):
@@ -689,8 +700,7 @@ def api_json(request: urllib.request.Request, timeout: int = 120) -> dict[str, A
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1200]
         request_id = str(exc.headers.get("X-Oneapi-Request-Id", "")).strip()
-        suffix = f"；请求 ID：{request_id}" if request_id else ""
-        raise UpstreamHTTPError(f"上游视频 API 请求失败（HTTP {exc.code}）：{detail}{suffix}") from exc
+        raise UpstreamHTTPError(exc.code, detail, request_id) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise UpstreamTransportError(f"ModelsNexus 网络结果未知：{exc}") from exc
 
@@ -818,10 +828,14 @@ def submit_video_task(job_id: str, task_key: str, payload: dict[str, Any], api_k
             raise RuntimeError(f"上游任务 {task_key} 已由不同模型模板提交；禁止覆盖或重复扣费")
         return str(current["id"])
     if isinstance(current, dict) and current.get("submission_state") == "submitting":
-        # 收到 HTTP 4xx 代表上一次请求已被网关明确拒绝，没有创建付费任务，可以安全重试。
-        rejected = state.get("status") == "failed" and "HTTP 4" in str(state.get("error", ""))
-        if not rejected:
-            raise RuntimeError(f"上游任务 {task_key} 提交结果未知；为避免重复扣费，系统不会再次提交")
+        raise RuntimeError(f"上游任务 {task_key} 提交结果未知；为避免重复扣费，系统不会再次提交")
+    if isinstance(current, dict) and current.get("submission_state") == "unknown":
+        request_id = str(current.get("request_id") or "")
+        suffix = f"（请求 ID：{request_id}）" if request_id else ""
+        raise RuntimeError(f"上游任务 {task_key} 的创建结果未知{suffix}；为避免重复扣费，系统不会再次提交")
+    if isinstance(current, dict) and current.get("submission_state") == "rejected":
+        if current.get("adapter") != adapter.task_namespace or current.get("payload_sha256") != payload_fingerprint:
+            raise RuntimeError(f"上游任务 {task_key} 的失败记录属于不同模型模板；禁止覆盖")
     tasks[task_key] = {
         "submission_state": "submitting", "model": payload["model"],
         "adapter": adapter.task_namespace, "payload_sha256": payload_fingerprint,
@@ -839,13 +853,27 @@ def submit_video_task(job_id: str, task_key: str, payload: dict[str, Any], api_k
     try:
         response = api_json(request, timeout=180)
     except UpstreamHTTPError as exc:
-        # api_json 的 RuntimeError 只对应已收到的 HTTP 错误响应，因此确定没有未知的在途任务。
-        tasks[task_key].update({"submission_state": "rejected", "error": str(exc)[:1200]})
-        write_state(job_id, upstream_tasks=tasks)
+        submission_state = "rejected" if exc.submission_is_definitively_rejected else "unknown"
+        tasks[task_key].update({
+            "submission_state": submission_state,
+            "http_status": exc.status_code,
+            "request_id": exc.request_id,
+            "error": str(exc)[:1200],
+        })
+        write_state(job_id, upstream_tasks=tasks, submission_state=submission_state)
+        raise
+    except UpstreamTransportError as exc:
+        tasks[task_key].update({"submission_state": "unknown", "error": str(exc)[:1200]})
+        write_state(job_id, upstream_tasks=tasks, submission_state="unknown")
         raise
     upstream_id = adapter.task_id(response)
     if not upstream_id:
-        raise RuntimeError(f"上游未返回任务 ID：{json.dumps(response, ensure_ascii=False)[:800]}")
+        tasks[task_key].update({
+            "submission_state": "unknown",
+            "error": "ModelsNexus 返回成功响应但没有任务 ID",
+        })
+        write_state(job_id, upstream_tasks=tasks, submission_state="unknown")
+        raise RuntimeError("上游未返回任务 ID；创建结果未知，为避免重复扣费，系统不会再次提交")
     tasks[task_key] = {
         "submission_state": "submitted", "model": payload["model"], "adapter": adapter.task_namespace,
         "payload_sha256": payload_fingerprint, "id": upstream_id,

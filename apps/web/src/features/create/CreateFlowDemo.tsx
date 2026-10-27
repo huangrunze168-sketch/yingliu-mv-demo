@@ -21,6 +21,8 @@ type DemoJob = {
   duration?: number;
   file_size?: number;
   error?: string;
+  client_request_id?: string;
+  submission_state?: 'not_started' | 'preparing' | 'submitting' | 'submitted' | 'rejected' | 'unknown' | 'completed';
 };
 type AgentShot = {
   id: string;
@@ -313,6 +315,7 @@ export function CreateFlowDemo() {
         const payload = await response.json() as DemoJob & { error?: string };
         if (!response.ok) throw new Error(payload.error || '任务状态读取失败');
         setJob(payload);
+        if (payload.client_request_id) submissionRequestIdRef.current ||= payload.client_request_id;
         setRunStage(payload.stage || '服务端正在生成视频');
         setRunProgress(current => Math.max(current, Math.min(100, 10 + Math.round((payload.progress || 0) * 0.9))));
         if (payload.status === 'completed') {
@@ -323,10 +326,13 @@ export function CreateFlowDemo() {
           setNotice('真实 MP4 已生成，可以直接播放或下载。服务器将在 24 小时后自动清理任务素材。');
         }
         if (payload.status === 'failed') {
-          submissionRequestIdRef.current = null;
+          // 4xx 明确拒绝才允许创建新请求；5xx/网络错误可能已经在上游创建任务，必须保留幂等键。
+          if (payload.submission_state === 'rejected') submissionRequestIdRef.current = null;
           setRunning(false);
           setRunStage('生成失败');
-          setNotice(payload.error || '生成失败，请更换素材后重试。');
+          setNotice(payload.submission_state === 'unknown'
+            ? `${payload.error || '上游创建结果未知'}；系统已锁定本次请求，禁止重复提交，请凭请求 ID 交由 ModelsNexus 查询。`
+            : payload.error || '生成失败，请检查参数或更换素材后重试。');
         }
       } catch (error) {
         setNotice(error instanceof Error ? error.message : '暂时无法读取生成进度');
@@ -405,7 +411,9 @@ export function CreateFlowDemo() {
     setAgentAnalysisError('');
     setAgentAnalyzing(false);
     setAssets({ song: null, lyrics: null, portrait: [], reference: null, voice: null });
-    setJob(project.job_id && project.result_url ? { id: project.job_id, status: 'completed', progress: 100, result_url: project.result_url } : null);
+    setJob(project.job_id
+      ? { id: project.job_id, status: project.result_url ? 'completed' : 'queued', progress: project.result_url ? 100 : Math.max(5, project.progress || 5), result_url: project.result_url }
+      : null);
     setPageView('workflow');
     setNotice(`已从服务器打开项目「${project.name}」。项目配置与 Agent 分镜已恢复。`);
   };

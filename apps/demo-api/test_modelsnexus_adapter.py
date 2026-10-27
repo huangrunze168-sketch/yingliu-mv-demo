@@ -14,6 +14,58 @@ SPEC.loader.exec_module(server)
 
 
 class ModelsNexusAdapterTests(unittest.TestCase):
+    def test_http_error_exposes_status_and_submission_certainty(self) -> None:
+        rejected = server.UpstreamHTTPError(400, "bad request", "request-400")
+        unknown = server.UpstreamHTTPError(502, "bad gateway", "request-502")
+        self.assertTrue(rejected.submission_is_definitively_rejected)
+        self.assertFalse(unknown.submission_is_definitively_rejected)
+        self.assertEqual(unknown.request_id, "request-502")
+
+    def test_submit_marks_502_unknown_and_blocks_repeat(self) -> None:
+        state = {"upstream_tasks": {}}
+
+        def fake_read_state(_job_id: str):
+            return state
+
+        def fake_write_state(_job_id: str, **updates):
+            state.update(updates)
+            return state
+
+        adapter = server.video_model_adapter("sd2.5海外版-480p")
+        payload = adapter.build_payload("提示词", "16:9", 5, server.ModelReferences())
+        upstream_error = server.UpstreamHTTPError(502, '{"code":"fail_to_fetch_task"}', "request-502")
+        with patch.object(server, "read_state", side_effect=fake_read_state), \
+             patch.object(server, "write_state", side_effect=fake_write_state), \
+             patch.object(server, "api_json", side_effect=upstream_error):
+            with self.assertRaises(server.UpstreamHTTPError):
+                server.submit_video_task("job-1", "task-1", payload, "api-key", adapter)
+            self.assertEqual(state["upstream_tasks"]["task-1"]["submission_state"], "unknown")
+            self.assertEqual(state["submission_state"], "unknown")
+            self.assertEqual(state["upstream_tasks"]["task-1"]["request_id"], "request-502")
+            with self.assertRaisesRegex(RuntimeError, "不会再次提交"):
+                server.submit_video_task("job-1", "task-1", payload, "api-key", adapter)
+
+    def test_submit_marks_400_rejected_and_allows_explicit_retry(self) -> None:
+        state = {"upstream_tasks": {}}
+
+        def fake_read_state(_job_id: str):
+            return state
+
+        def fake_write_state(_job_id: str, **updates):
+            state.update(updates)
+            return state
+
+        adapter = server.video_model_adapter("sd2.5海外版-480p")
+        payload = adapter.build_payload("提示词", "16:9", 5, server.ModelReferences())
+        responses = [server.UpstreamHTTPError(400, "bad request", "request-400"), {"id": "task-ok"}]
+        with patch.object(server, "read_state", side_effect=fake_read_state), \
+             patch.object(server, "write_state", side_effect=fake_write_state), \
+             patch.object(server, "api_json", side_effect=responses):
+            with self.assertRaises(server.UpstreamHTTPError):
+                server.submit_video_task("job-1", "task-1", payload, "api-key", adapter)
+            self.assertEqual(state["upstream_tasks"]["task-1"]["submission_state"], "rejected")
+            self.assertEqual(server.submit_video_task("job-1", "task-1", payload, "api-key", adapter), "task-ok")
+
     def test_reference_builder_only_returns_typed_urls(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = pathlib.Path(temporary)
