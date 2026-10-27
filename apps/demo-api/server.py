@@ -1489,6 +1489,14 @@ def finalize_agent_result(
     model: str,
     usage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # 模型偶尔会把单项数组压成字符串。先归一化所有前端会遍历的字段，
+    # 避免一次非标准 JSON 结构导致 React 整页白屏。
+    for key in ("timeline", "material_observations"):
+        value = result.get(key)
+        if value is None:
+            result[key] = []
+        elif not isinstance(value, list):
+            result[key] = [value]
     cards = result.get("analysis_cards")
     shots = result.get("shots")
     if not isinstance(cards, list) or len(cards) != 4 or not isinstance(shots, list) or len(shots) < 1:
@@ -1500,6 +1508,11 @@ def finalize_agent_result(
         required_breakdown_fields = {"summary", "shot_scale_pattern", "composition", "lighting_color", "blocking_performance", "editing_rhythm", "reference_shots", "rhetorical_enhancement"}
         if not isinstance(breakdown, dict) or not required_breakdown_fields.issubset(breakdown):
             raise RuntimeError("Agent 未完整拆解对标视频，请重新分析")
+        enhancements = breakdown.get("rhetorical_enhancement")
+        if enhancements is None:
+            breakdown["rhetorical_enhancement"] = []
+        elif not isinstance(enhancements, list):
+            breakdown["rhetorical_enhancement"] = [str(enhancements)]
         reference_shots = breakdown.get("reference_shots")
         required_reference_shot_fields = {"source_time", "visual_blueprint", "subject_layout", "action_timing", "shot_size_camera", "lighting_color", "transition", "target_mapping"}
         if not isinstance(reference_shots, list) or not reference_shots or any(not isinstance(item, dict) or not required_reference_shot_fields.issubset(item) or any(not str(item[key]).strip() for key in required_reference_shot_fields) for item in reference_shots):

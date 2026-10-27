@@ -605,12 +605,19 @@ export function CreateFlowDemo() {
   };
 
   const durationLabel = job?.duration ? `${Math.floor(job.duration / 60).toString().padStart(2, '0')}:${Math.floor(job.duration % 60).toString().padStart(2, '0')}` : '待生成';
-  const displayedShots: AgentShot[] = agentAnalysis?.shots ?? [];
-  const displayedCards = agentAnalysis?.analysis_cards ?? [];
-  const corpusItems = agentAnalysis?.corpus_retrieval?.items ?? [];
+  const displayedShots: AgentShot[] = Array.isArray(agentAnalysis?.shots) ? agentAnalysis.shots : [];
+  const displayedCards = Array.isArray(agentAnalysis?.analysis_cards) ? agentAnalysis.analysis_cards : [];
+  const corpusItems = Array.isArray(agentAnalysis?.corpus_retrieval?.items) ? agentAnalysis.corpus_retrieval.items : [];
+  const timelineItems = Array.isArray(agentAnalysis?.timeline) ? agentAnalysis.timeline : [];
+  const referenceShots = Array.isArray(agentAnalysis?.reference_breakdown?.reference_shots) ? agentAnalysis.reference_breakdown.reference_shots : [];
+  const rhetoricalEnhancements = Array.isArray(agentAnalysis?.reference_breakdown?.rhetorical_enhancement)
+    ? agentAnalysis.reference_breakdown.rhetorical_enhancement
+    : agentAnalysis?.reference_breakdown?.rhetorical_enhancement
+      ? [String(agentAnalysis.reference_breakdown.rhetorical_enhancement)]
+      : [];
   const corpusById = useMemo(() => new Map(corpusItems.map(item => [item.id, item])), [corpusItems]);
   const corpusReady = corpusItems.length > 0;
-  const analysisHasReferenceVideo = Boolean(agentAnalysis?.material_manifest?.reference_video || agentAnalysis?.reference_breakdown?.reference_shots?.length);
+  const analysisHasReferenceVideo = Boolean(agentAnalysis?.material_manifest?.reference_video || referenceShots.length);
   const referenceBlueprintReady = !referenceIsVideo || analysisHasReferenceVideo;
 
   if (pageView === 'projects') {
@@ -786,7 +793,7 @@ export function CreateFlowDemo() {
             <div className="mv-analysis-grid">
               {displayedCards.map(({ title, value, copy }, index) => <article key={title}><span>0{index + 1}</span><h3>{title}</h3><b>{value}</b><p>{copy}</p></article>)}
             </div>
-            <section className="mv-timeline-card"><div><p className="overline">AUDIO TIMELINE · REAL AGENT RESULT</p><h3>{projectName || '未命名项目'} · {agentAnalysis?.project_summary}</h3></div><div className="mv-waveform">{Array.from({ length: 54 }, (_, index) => <i key={index} style={{ height: `${20 + ((index * 17) % 64)}%` }} />)}</div><div className="mv-timeline-labels">{agentAnalysis?.timeline?.map(item => <span key={`${item.time}-${item.label}`}>{item.time} {item.label}</span>)}</div></section>
+            <section className="mv-timeline-card"><div><p className="overline">AUDIO TIMELINE · REAL AGENT RESULT</p><h3>{projectName || '未命名项目'} · {agentAnalysis?.project_summary}</h3></div><div className="mv-waveform">{Array.from({ length: 54 }, (_, index) => <i key={index} style={{ height: `${20 + ((index * 17) % 64)}%` }} />)}</div><div className="mv-timeline-labels">{timelineItems.map(item => <span key={`${item.time}-${item.label}`}>{item.time} {item.label}</span>)}</div></section>
           </div>
           )
         )}
@@ -799,7 +806,7 @@ export function CreateFlowDemo() {
             {corpusReady ? <>
               <section className="mv-director-proof"><div><small>FILM CORPUS RETRIEVAL</small><h3>{director} · 电影语料已检索并参与推理</h3></div><p>{agentAnalysis?.director_application}</p><span>{corpusItems.length} 条命中 · {agentAnalysis?.corpus_retrieval?.coverage.length || 0} 类覆盖</span></section>
               <section className="mv-corpus-results"><header><div><small>RETRIEVAL EVIDENCE</small><h3>本次电影语料检索命中</h3></div><span>{agentAnalysis?.corpus_retrieval?.version}</span></header><div>{corpusItems.map(item => <article key={item.id}><div><b>{item.title}</b><em>{item.category}</em></div><p>{item.text}</p></article>)}</div></section>
-              {agentAnalysis?.reference_breakdown?.reference_shots?.length && analysisHasReferenceVideo ? <section className="mv-reference-breakdown"><header><div><small>BENCHMARK VIDEO BLUEPRINT</small><h3>对标视频画面骨架</h3></div><span>具体画面优先 · 导演语料修辞</span></header><p>{agentAnalysis.reference_breakdown.summary}</p><dl><div><dt>景别规律</dt><dd>{agentAnalysis.reference_breakdown.shot_scale_pattern}</dd></div><div><dt>构图空间</dt><dd>{agentAnalysis.reference_breakdown.composition}</dd></div><div><dt>光线色彩</dt><dd>{agentAnalysis.reference_breakdown.lighting_color}</dd></div><div><dt>人物调度</dt><dd>{agentAnalysis.reference_breakdown.blocking_performance}</dd></div><div><dt>剪辑节奏</dt><dd>{agentAnalysis.reference_breakdown.editing_rhythm}</dd></div></dl><div className="mv-reference-shot-list">{agentAnalysis.reference_breakdown.reference_shots.map((item, index) => <article key={`${item.source_time}-${index}`}><header><b>{item.source_time}</b><span>画面 {index + 1}</span></header><p>{item.visual_blueprint}</p><small><b>主体布局：</b>{item.subject_layout}</small><small><b>动作节拍：</b>{item.action_timing}</small><small><b>镜头：</b>{item.shot_size_camera}</small><small><b>切换：</b>{item.transition}</small><small><b>项目映射：</b>{item.target_mapping}</small></article>)}</div><div className="mv-reference-methods"><div><b>导演库与电影语料修辞</b>{agentAnalysis.reference_breakdown.rhetorical_enhancement.map(item => <span key={item}>{item}</span>)}</div></div></section> : null}
+              {referenceShots.length && analysisHasReferenceVideo && agentAnalysis?.reference_breakdown ? <section className="mv-reference-breakdown"><header><div><small>BENCHMARK VIDEO BLUEPRINT</small><h3>对标视频画面骨架</h3></div><span>具体画面优先 · 导演语料修辞</span></header><p>{agentAnalysis.reference_breakdown.summary}</p><dl><div><dt>景别规律</dt><dd>{agentAnalysis.reference_breakdown.shot_scale_pattern}</dd></div><div><dt>构图空间</dt><dd>{agentAnalysis.reference_breakdown.composition}</dd></div><div><dt>光线色彩</dt><dd>{agentAnalysis.reference_breakdown.lighting_color}</dd></div><div><dt>人物调度</dt><dd>{agentAnalysis.reference_breakdown.blocking_performance}</dd></div><div><dt>剪辑节奏</dt><dd>{agentAnalysis.reference_breakdown.editing_rhythm}</dd></div></dl><div className="mv-reference-shot-list">{referenceShots.map((item, index) => <article key={`${item.source_time}-${index}`}><header><b>{item.source_time}</b><span>画面 {index + 1}</span></header><p>{item.visual_blueprint}</p><small><b>主体布局：</b>{item.subject_layout}</small><small><b>动作节拍：</b>{item.action_timing}</small><small><b>镜头：</b>{item.shot_size_camera}</small><small><b>切换：</b>{item.transition}</small><small><b>项目映射：</b>{item.target_mapping}</small></article>)}</div><div className="mv-reference-methods"><div><b>导演库与电影语料修辞</b>{rhetoricalEnhancements.map((item, index) => <span key={`${item}-${index}`}>{item}</span>)}</div></div></section> : null}
             </> : <section className="mv-corpus-missing"><div><b>这批分镜没有电影语料检索记录</b><p>它是在语料库上线前生成的历史结果，不能作为已检索结果继续送审。</p></div><button type="button" onClick={() => { setActiveStep(0); setNotice('请重新选择本地素材并执行 Agent 分析，新分镜会显示真实语料命中。'); }}>返回第一步重新分析</button></section>}
             <div className="mv-prompt-gate-banner"><div><span>✓</span><p><b>八项提示词门禁</b><small>歌词时间窗 · 人物一致性 · 对标画面骨架 · 场景动作景别 · 摄影运镜 · 导演与语料修辞 · 负面提示词 · 镜头衔接</small></p></div><em>本步骤只出提示词，不生成图片</em></div>
             <div className="storyboard-grid mv-shot-grid">
