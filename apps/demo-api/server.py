@@ -1929,7 +1929,9 @@ def analyze_reference_video_isolated(
             digest.update(chunk)
     cache_dir = DSH_HOME / "reference-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / f"{digest.hexdigest()}.json"
+    cache_identity = f"reference-blueprint-v2:{DEEPSEEK_MODEL}:{digest.hexdigest()}"
+    cache_key = hashlib.sha256(cache_identity.encode("utf-8")).hexdigest()
+    cache_path = cache_dir / f"{cache_key}.json"
     if cache_path.is_file():
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -2013,6 +2015,101 @@ def analyze_reference_video_isolated(
     return analysis
 
 
+def analyze_portraits_isolated(
+    portrait_paths: list[str],
+    directory: pathlib.Path,
+    environment: dict[str, str],
+) -> dict[str, Any]:
+    """独立理解人物图；结果只能描述身份与服装，不能参与对标视频画面判断。"""
+    if not portrait_paths:
+        return {"provided": False, "summary": "未提供人物参考图", "subjects": [], "shared_constraints": []}
+    digest = hashlib.sha256(f"portrait-blueprint-v1:{DEEPSEEK_MODEL}".encode("utf-8"))
+    for raw_path in sorted(portrait_paths):
+        path = pathlib.Path(raw_path)
+        digest.update(path.name.encode("utf-8", errors="replace"))
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    cache_dir = DSH_HOME / "portrait-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{digest.hexdigest()}.json"
+    if cache_path.is_file():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if isinstance(cached, dict) and isinstance(cached.get("subjects"), list) and cached["subjects"]:
+                return cached
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+
+    task = f"""你是人物参考图分析 Agent。本会话只能分析以下同级人物参考图：
+{json.dumps(portrait_paths, ensure_ascii=False)}
+
+并行调用 read_image 读取全部图片。只描述图片中真实可见的人物身份特征、脸部、发型、体态与服装；禁止推断或输出图片背景、场景、动作设计、构图、摄影、运镜、导演风格和电影语料。
+最终只输出一个合法 JSON 对象，不要 Markdown 或解释：
+{{
+  "portrait_analysis": {{
+    "provided": true,
+    "summary": "全部同级人物图的身份一致性总结",
+    "subjects": [{{
+      "file": "图片文件名",
+      "identity": "年龄感、性别表达和稳定身份特征",
+      "face_hair": "脸型、五官、肤色、发型与发色",
+      "wardrobe": "服装、配饰、材质与颜色",
+      "body": "体态与身形",
+      "consistency_constraints": "生成时必须保持的一致性约束"
+    }}],
+    "shared_constraints": ["跨镜头人物一致性约束"]
+  }}
+}}
+"""
+    completed = run_dsh_process(
+        [DSH_COMMAND, "--profile", "headless", "-"],
+        input_text=task,
+        cwd=directory,
+        environment=environment,
+        timeout=None,
+    )
+    (directory / "portrait-dsh-stdout.txt").write_text(completed.stdout or "", encoding="utf-8")
+    (directory / "portrait-dsh-stderr.txt").write_text(completed.stderr or "", encoding="utf-8")
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "未知错误").strip()[-1600:]
+        raise RuntimeError(f"人物参考图隔离分析失败：{detail}")
+    parsed = parse_agent_json(completed.stdout)
+    analysis = parsed.get("portrait_analysis") if isinstance(parsed.get("portrait_analysis"), dict) else parsed
+    subjects = analysis.get("subjects") if isinstance(analysis, dict) else None
+    if not isinstance(subjects, list) or not subjects:
+        raise RuntimeError("人物参考图隔离分析未返回人物身份约束")
+    analysis["provided"] = True
+    analysis["summary"] = agent_display_text(analysis.get("summary"))
+    raw_constraints = analysis.get("shared_constraints", [])
+    if not isinstance(raw_constraints, list):
+        raw_constraints = [raw_constraints]
+    analysis["shared_constraints"] = [
+        text for text in (agent_display_text(item) for item in raw_constraints) if text
+    ]
+    required = {"file", "identity", "face_hair", "wardrobe", "body", "consistency_constraints"}
+    normalized_subjects = []
+    for subject in subjects:
+        if not isinstance(subject, dict) or any(not agent_display_text(subject.get(key)) for key in required):
+            raise RuntimeError("人物参考图隔离分析返回结构不完整")
+        normalized_subjects.append({key: agent_display_text(subject.get(key)) for key in required})
+    analysis["subjects"] = normalized_subjects
+    cache_path.write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+    return analysis
+
+
+def prepare_director_corpus_branch(context: dict[str, Any]) -> dict[str, Any]:
+    """独立准备导演方法与电影语料，最终仍需按视频蓝图重新排序。"""
+    director = str(context.get("director") or "王家卫")
+    methods = DIRECTOR_METHODS.get(director, DIRECTOR_METHODS["王家卫"])
+    query = str(context.get("corpus_query") or context.get("requirements") or context.get("title") or "MV")
+    return {
+        "director": director,
+        "director_methods": methods,
+        "corpus_retrieval": retrieve_film_corpus(director, methods, query),
+    }
+
+
 def call_dsh_headless_agent(
     context: dict[str, Any],
     directory: pathlib.Path,
@@ -2028,9 +2125,54 @@ def call_dsh_headless_agent(
     reference_duration = float(context.get("reference_video", {}).get("duration_seconds") or 0)
     fast_video_path = bool(files.get("reference") and reference_duration <= 20)
     agent_context = json.loads(json.dumps(context, ensure_ascii=False))
+    all_files = {key: str((directory / filename).resolve()) for key, filename in files.items()}
+    reference_path = all_files.get("reference", "")
+    portrait_paths = [value for key, value in all_files.items() if key.startswith("portrait")]
+
+    # 三路并行准备：视频只看视频、人物只看人物图、导演与语料只读结构化索引。
+    # 最终汇总严格等待三路全部完成，任何一路失败都不会提前生成正式提示词。
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="yingliu-agent-prepare") as preparation_pool:
+        reference_future = preparation_pool.submit(
+            analyze_reference_video_isolated,
+            pathlib.Path(reference_path),
+            agent_context["reference_video"],
+            directory,
+            environment,
+        ) if reference_path else None
+        portrait_future = preparation_pool.submit(
+            analyze_portraits_isolated,
+            portrait_paths,
+            directory,
+            environment,
+        )
+        corpus_future = preparation_pool.submit(prepare_director_corpus_branch, agent_context)
+
+        isolated_analysis = reference_future.result() if reference_future else None
+        portrait_analysis = portrait_future.result()
+        director_corpus = corpus_future.result()
+
+    if isolated_analysis:
+        agent_context["reference_video"]["isolated_analysis"] = isolated_analysis
+    agent_context["portrait_analysis"] = portrait_analysis
+    agent_context["director_methods"] = director_corpus["director_methods"]
+    agent_context["corpus_retrieval"] = director_corpus["corpus_retrieval"]
+    # 初步检索与视频分析并行；视频蓝图返回后，用真实场景、动作和摄影语义进行一次快速重排。
+    if isolated_analysis:
+        rerank_query = "\n".join(filter(None, [
+            str(agent_context.get("corpus_query") or ""),
+            agent_display_text(isolated_analysis.get("summary")),
+            agent_display_text(isolated_analysis.get("shot_scale_pattern")),
+            agent_display_text(isolated_analysis.get("camera_pattern")),
+            agent_display_text(isolated_analysis.get("lighting_color")),
+            agent_display_text(isolated_analysis.get("editing_rhythm")),
+        ]))
+        agent_context["corpus_retrieval"] = retrieve_film_corpus(
+            director_corpus["director"],
+            director_corpus["director_methods"],
+            rerank_query,
+        )
     if fast_video_path:
-        # DSH 每一个 Agent 步骤都会携带上下文。短视频只保留最高相关的 6 条语料，
-        # 避免同一批长文本在工具调用与最终输出阶段反复占用模型时间。
+        # 汇总阶段只携带最高相关的 6 条语料，避免长文本拖慢正式提示词生成。
         retrieval = agent_context.get("corpus_retrieval")
         if isinstance(retrieval, dict) and isinstance(retrieval.get("items"), list):
             compact_items = []
@@ -2039,28 +2181,23 @@ def call_dsh_headless_agent(
                 compact_item["text"] = str(compact_item.get("text", ""))[:500]
                 compact_items.append(compact_item)
             retrieval["items"] = compact_items
-    all_files = {key: str((directory / filename).resolve()) for key, filename in files.items()}
-    reference_path = all_files.get("reference", "")
-    if reference_path:
-        isolated_analysis = analyze_reference_video_isolated(
-            pathlib.Path(reference_path),
-            agent_context["reference_video"],
-            directory,
-            environment,
-        )
-        agent_context["reference_video"]["isolated_analysis"] = isolated_analysis
-    # 第二阶段不暴露对标视频文件，只接收第一阶段锁定的结构化蓝图，避免再次读取时与人物图串料。
+    agent_context["parallel_preparation"] = {
+        "reference_video": "completed" if isolated_analysis else "not_provided",
+        "portraits": "completed" if portrait_paths else "not_provided",
+        "director_corpus": "completed",
+        "barrier_passed": True,
+    }
+
+    # 汇总阶段不暴露视频和人物原文件，只接收两路隔离分析结果，避免重新读取和交叉污染。
     manifest = {
         "context": agent_context,
-        "files": {key: value for key, value in all_files.items() if key != "reference"},
+        "files": {
+            key: value for key, value in all_files.items()
+            if key != "reference" and not key.startswith("portrait")
+        },
     }
     manifest_path = directory / "agent-context.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    portrait_paths = [
-        value
-        for key, value in manifest["files"].items()
-        if key.startswith("portrait")
-    ]
     if fast_video_path:
         output_rule = "shots 必须跟随真实动作阶段和切点动态分段，通常 4–8 项，不得为了缩短输出合并关键动作；每项 prompt 不超过 900 个汉字，其他单个文本字段不超过 220 个汉字。保持具体可执行，但不要重复同义描述。"
     else:
@@ -2073,13 +2210,13 @@ def call_dsh_headless_agent(
 
 执行规则：
 1. 如果 context.reference_video.isolated_analysis 存在，它是上一阶段只看对标视频得到的权威蓝图。禁止调用 video_probe、video_analyze 或 video_ask，也禁止重新解释对标视频；必须逐段复制 isolated_analysis.timeline_segments 的 source_time、visual_blueprint、subject_layout、action_timing、shot_size_camera、lighting_color 和 transition。
-2. 人物参考图全部同级。只允许使用 read_image 逐张检查人物外貌、服装和身份约束：{json.dumps(portrait_paths, ensure_ascii=False)}。人物图只能替换蓝图中的人物身份与服装，绝不能提供背景、动作、构图或摄影信息。
+2. context.portrait_analysis 是上一阶段只看人物图得到的权威身份与服装约束。禁止再次调用 read_image；人物分析只能替换蓝图中的人物身份与服装，绝不能提供背景、动作、构图或摄影信息。
 3. 对标视频隔离蓝图决定画面几何、动作、运镜和切镜；导演方法和电影语料只能增强光色、质感和叙事，不能覆盖蓝图。
 4. reference_breakdown.reference_shots 必须逐项覆盖 context.reference_video.isolated_analysis.timeline_segments，source_time 必须逐字复制，不能漏段；每个 shots.reference_match 也必须引用其中一个完全相同的 source_time，并逐字继承该段画面约束。
 5. 每条 shots.prompt 必须以对应时间轴和歌词开头，并写入 reference_match.source_time；不得出现导演姓名、电影语料编号、字幕或水印。
    若存在隔离蓝图，prompt 正文必须完整写入对应段的 visual_blueprint、subject_layout、action_timing、shot_size_camera 和 transition，而不是只写“参考对标视频”。
 6. 每镜 corpus_refs 至少选择 3 个 context.corpus_retrieval.items 中真实存在的 id，但这些 id 只能出现在 corpus_refs 元数据。
-7. 不要修改、删除或移动用户文件，不要发起视频生成。
+7. 三路准备已通过 context.parallel_preparation.barrier_passed 汇总屏障。禁止调用任何媒体或文件工具，不要修改、删除或移动用户文件，不要发起视频生成。
 8. 输出规模：{output_rule}
 
 最终只输出一个合法 JSON 对象，不要 Markdown、解释或第二个 JSON。必须包含：
@@ -2277,6 +2414,7 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
             "model": model_name,
             "resolution": str(form.getfirst("resolution", "720p")),
             "director": director,
+            "corpus_query": corpus_query,
             "corpus_retrieval": retrieve_film_corpus(director, director_methods, corpus_query),
             "duration": duration,
             "portrait_count": len(portrait_keys),

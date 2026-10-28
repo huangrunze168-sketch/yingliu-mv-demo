@@ -174,6 +174,9 @@ class AgentJsonParserTests(unittest.TestCase):
     def test_dsh_headless_receives_workspace_and_video_tool_instructions(self) -> None:
         context = {
             "title": "测试",
+            "requirements": "严格复刻对标视频",
+            "director": "王家卫",
+            "corpus_query": "测试 MV",
             "has_reference": True,
             "has_song": False,
             "has_lyrics": False,
@@ -186,31 +189,42 @@ class AgentJsonParserTests(unittest.TestCase):
             directory = pathlib.Path(temporary)
             (directory / "reference.mp4").write_bytes(b"video")
             (directory / "portrait-1.png").write_bytes(b"image")
-            isolated_output = json.dumps({
-                "reference_video_analysis": {
-                    "summary": "真实视频",
-                    "subject_identity": "黑衣年轻男性",
-                    "environment": "灰色室内",
-                    "shot_scale_pattern": "中景",
-                    "camera_pattern": "固定机位",
+            isolated_analysis = {
+                "summary": "真实视频",
+                "subject_identity": "黑衣年轻男性",
+                "environment": "灰色室内",
+                "shot_scale_pattern": "中景",
+                "camera_pattern": "固定机位",
+                "lighting_color": "冷白光",
+                "editing_rhythm": "连续镜头",
+                "timeline_segments": [{
+                    "source_time": "00:00.000–00:03.000",
+                    "visual_blueprint": "黑衣男性居中站立",
+                    "subject_layout": "单人居中",
+                    "action_timing": "抬手",
+                    "shot_size_camera": "中景固定",
                     "lighting_color": "冷白光",
-                    "editing_rhythm": "连续镜头",
-                    "timeline_segments": [{
-                        "source_time": "00:00.000–00:03.000",
-                        "visual_blueprint": "黑衣男性居中站立",
-                        "subject_layout": "单人居中",
-                        "action_timing": "抬手",
-                        "shot_size_camera": "中景固定",
-                        "lighting_color": "冷白光",
-                        "transition": "连续动作",
-                    }],
-                },
-            }, ensure_ascii=False)
-            isolated_completed = SimpleNamespace(returncode=0, stdout=isolated_output, stderr="")
+                    "transition": "连续动作",
+                }],
+            }
+            portrait_analysis = {
+                "provided": True,
+                "summary": "银发老人",
+                "subjects": [{"file": "portrait-1.png", "identity": "银发老人"}],
+                "shared_constraints": ["保持脸部一致"],
+            }
             final_completed = SimpleNamespace(returncode=0, stdout='{"project_summary":"完成"}', stderr="")
             with patch.object(server, "dsh_is_available", return_value=True), \
                  patch.object(server, "DSH_HOME", directory / "dsh-home"), \
-                 patch.object(server, "run_dsh_process", side_effect=[isolated_completed, final_completed]) as run, \
+                 patch.object(server, "analyze_reference_video_isolated", return_value=isolated_analysis) as reference_branch, \
+                 patch.object(server, "analyze_portraits_isolated", return_value=portrait_analysis) as portrait_branch, \
+                 patch.object(server, "prepare_director_corpus_branch", return_value={
+                     "director": "王家卫",
+                     "director_methods": {"composition": "门框构图"},
+                     "corpus_retrieval": {"items": [{"id": "film-1", "text": "初步语料"}]},
+                 }) as corpus_branch, \
+                 patch.object(server, "retrieve_film_corpus", return_value={"items": [{"id": "film-1", "text": "重排语料"}]}), \
+                 patch.object(server, "run_dsh_process", return_value=final_completed) as run, \
                  patch.object(server, "finalize_agent_result", return_value={"provider": "DSH Headless"}):
                 result = server.call_dsh_headless_agent(
                     context,
@@ -219,27 +233,27 @@ class AgentJsonParserTests(unittest.TestCase):
                 )
 
             self.assertEqual(result["provider"], "DSH Headless")
-            self.assertEqual(run.call_count, 2)
-            first_call, second_call = run.call_args_list
-            arguments = first_call.args[0]
+            reference_branch.assert_called_once()
+            portrait_branch.assert_called_once()
+            corpus_branch.assert_called_once()
+            self.assertEqual(run.call_count, 1)
+            final_call = run.call_args
+            arguments = final_call.args[0]
             self.assertEqual(arguments[1:4], ["--profile", "headless", "-"])
-            self.assertEqual(first_call.kwargs["cwd"], directory)
-            isolated_task = first_call.kwargs["input_text"]
-            self.assertIn("必须且只能调用一次 video_analyze", isolated_task)
-            self.assertIn("显式传 maxFrames=12", isolated_task)
-            self.assertIn(str((directory / "reference.mp4").resolve()), isolated_task)
-            self.assertNotIn("portrait-1.png", isolated_task)
-            task = second_call.kwargs["input_text"]
+            self.assertEqual(final_call.kwargs["cwd"], directory)
+            task = final_call.kwargs["input_text"]
             self.assertIn("禁止调用 video_probe、video_analyze 或 video_ask", task)
             self.assertIn("isolated_analysis", task)
-            self.assertIn("portrait-1.png", task)
-            self.assertIn("人物图只能替换蓝图中的人物身份与服装", task)
+            self.assertIn("portrait_analysis", task)
+            self.assertIn("禁止再次调用 read_image", task)
+            self.assertIn("barrier_passed", task)
             self.assertIn("shots 必须跟随真实动作阶段和切点动态分段", task)
-            self.assertIsNone(first_call.kwargs["timeout"])
-            self.assertIsNone(second_call.kwargs["timeout"])
+            self.assertIsNone(final_call.kwargs["timeout"])
             manifest = json.loads((directory / "agent-context.json").read_text(encoding="utf-8"))
             self.assertNotIn("reference", manifest["files"])
+            self.assertNotIn("portrait1", manifest["files"])
             self.assertEqual(manifest["context"]["reference_video"]["isolated_analysis"]["summary"], "真实视频")
+            self.assertTrue(manifest["context"]["parallel_preparation"]["barrier_passed"])
             self.assertEqual((directory / "agent-dsh-stdout.txt").read_text(encoding="utf-8"), final_completed.stdout)
             self.assertEqual((directory / "agent-dsh-stderr.txt").read_text(encoding="utf-8"), final_completed.stderr)
 
