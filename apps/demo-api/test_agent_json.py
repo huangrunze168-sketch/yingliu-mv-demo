@@ -93,7 +93,7 @@ class AgentJsonParserTests(unittest.TestCase):
             self.assertIn('"portrait1"', task)
             self.assertIn("同一个工具调用回合中并行调用 read_image", task)
             self.assertIn("shots 最多 4 项", task)
-            self.assertEqual(run.call_args.kwargs["timeout"], 150)
+            self.assertIsNone(run.call_args.kwargs["timeout"])
             manifest = json.loads((directory / "agent-context.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["files"]["reference"], str((directory / "reference.mp4").resolve()))
             self.assertEqual((directory / "agent-dsh-stdout.txt").read_text(encoding="utf-8"), completed.stdout)

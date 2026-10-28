@@ -1570,7 +1570,7 @@ def run_dsh_process(
     input_text: str,
     cwd: pathlib.Path,
     environment: dict[str, str],
-    timeout: int,
+    timeout: int | None,
 ) -> subprocess.CompletedProcess[str]:
     """运行一次 DSH；超时必须终止整个进程组，避免 FFmpeg/视觉工具残留。"""
     process = subprocess.Popen(
@@ -1591,7 +1591,7 @@ def run_dsh_process(
         else:
             process.kill()
         process.communicate()
-        raise RuntimeError(f"DSH Headless 分析超过 {timeout} 秒，已安全终止；请重试") from exc
+        raise RuntimeError("DSH Headless 分析被服务端终止，请重试") from exc
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
@@ -1679,7 +1679,7 @@ shots 必须覆盖完整规划时长，且每条 prompt 都必须独立完整。
         input_text=task,
         cwd=directory,
         environment=environment,
-        timeout=min(DSH_TIMEOUT_SECONDS, 150 if fast_video_path else 600),
+        timeout=None,
     )
     (directory / "agent-dsh-stdout.txt").write_text(completed.stdout or "", encoding="utf-8")
     (directory / "agent-dsh-stderr.txt").write_text(completed.stderr or "", encoding="utf-8")
