@@ -1482,6 +1482,103 @@ def parse_agent_json(content: str) -> dict[str, Any]:
     return result
 
 
+def normalize_reference_breakdown(result: dict[str, Any], context: dict[str, Any]) -> None:
+    """把模型已输出在分镜里的真实对标分析归一化到 reference_shots。
+
+    DSH 偶尔会完整填写 shots.reference_match，却漏掉 reference_breakdown 中的同义字段。
+    这不是视频分析失败，不应让整次请求报 500；这里只搬运已经存在的分析结果，绝不
+    伪造新的画面内容。
+    """
+    if not context.get("has_reference"):
+        return
+    breakdown = result.get("reference_breakdown")
+    if not isinstance(breakdown, dict):
+        breakdown = {}
+        result["reference_breakdown"] = breakdown
+    breakdown_defaults = {
+        "summary": str(result.get("project_summary", "")).strip(),
+        "shot_scale_pattern": "按下列逐段镜头的景别与机位执行",
+        "composition": "按下列逐段镜头的主体布局与空间关系执行",
+        "lighting_color": "按下列逐段镜头的光线与色彩执行",
+        "blocking_performance": "按下列逐段镜头的动作时序执行",
+        "editing_rhythm": "按下列逐段镜头的时间窗与转场执行",
+        "rhetorical_enhancement": [],
+    }
+    for key, fallback in breakdown_defaults.items():
+        value = breakdown.get(key)
+        if value in (None, "", [], {}):
+            breakdown[key] = fallback
+
+    existing = breakdown.get("reference_shots")
+    existing_items = existing if isinstance(existing, list) else []
+    shots = result.get("shots") if isinstance(result.get("shots"), list) else []
+    candidates: list[dict[str, Any]] = [item for item in existing_items if isinstance(item, dict)]
+    for shot in shots:
+        if not isinstance(shot, dict):
+            continue
+        match = shot.get("reference_match")
+        if not isinstance(match, dict) or not str(match.get("source_time", "")).strip():
+            continue
+        method = shot.get("director_method") if isinstance(shot.get("director_method"), dict) else {}
+        candidates.append({
+            "source_time": match.get("source_time"),
+            "visual_blueprint": match.get("visual_blueprint"),
+            "subject_layout": match.get("subject_layout"),
+            "action_timing": match.get("action_timing"),
+            "shot_size_camera": match.get("shot_size_camera") or match.get("camera_motion") or method.get("camera"),
+            "lighting_color": match.get("lighting_color") or method.get("lighting_color") or breakdown.get("lighting_color"),
+            "transition": match.get("transition"),
+            "target_mapping": match.get("target_mapping") or "保留该段对标画面骨架，仅按项目需求替换人物、服装与场景语义",
+        })
+
+    required = ("source_time", "visual_blueprint", "subject_layout", "action_timing", "shot_size_camera", "lighting_color", "transition", "target_mapping")
+    normalized: list[dict[str, str]] = []
+    seen_ranges: set[str] = set()
+    for item in candidates:
+        normalized_item = {key: str(item.get(key, "")).strip() for key in required}
+        source_time = normalized_item["source_time"]
+        if not source_time or source_time in seen_ranges or any(not normalized_item[key] for key in required):
+            continue
+        seen_ranges.add(source_time)
+        normalized.append(normalized_item)
+    breakdown["reference_shots"] = normalized
+
+
+def reference_ranges_cover_video(reference_shots: list[dict[str, Any]], duration: float) -> bool:
+    """允许 Agent 按动作阶段重新分段，但要求结果连续覆盖整条对标视频。"""
+    def timestamp_seconds(value: str) -> float:
+        match = re.fullmatch(r"\s*(\d+):(\d{2}(?:\.\d+)?)\s*", value)
+        if not match:
+            raise ValueError(value)
+        return int(match.group(1)) * 60 + float(match.group(2))
+
+    intervals: list[tuple[float, float]] = []
+    for item in reference_shots:
+        parts = re.split(r"\s*[–—~～-]\s*", str(item.get("source_time", "")).strip(), maxsplit=1)
+        if len(parts) != 2:
+            continue
+        try:
+            start, end = timestamp_seconds(parts[0]), timestamp_seconds(parts[1])
+        except ValueError:
+            continue
+        if end > start:
+            intervals.append((max(0.0, start), min(duration, end)))
+    if not intervals or duration <= 0:
+        return False
+    intervals.sort()
+    merged_start, merged_end = intervals[0]
+    covered = 0.0
+    first_start = merged_start
+    for start, end in intervals[1:]:
+        if start <= merged_end + 0.35:
+            merged_end = max(merged_end, end)
+        else:
+            covered += max(0.0, merged_end - merged_start)
+            merged_start, merged_end = start, end
+    covered += max(0.0, merged_end - merged_start)
+    return first_start <= 0.5 and merged_end >= duration - 0.5 and covered >= duration * 0.9
+
+
 def finalize_agent_result(
     result: dict[str, Any],
     context: dict[str, Any],
@@ -1501,6 +1598,7 @@ def finalize_agent_result(
     shots = result.get("shots")
     if not isinstance(cards, list) or len(cards) != 4 or not isinstance(shots, list) or len(shots) < 1:
         raise RuntimeError(f"{provider} 返回结构不完整，请重试")
+    normalize_reference_breakdown(result, context)
     required_method_fields = {"composition", "camera", "lighting_color", "blocking", "rhythm"}
     corpus_ids = {str(item.get("id")) for item in context["corpus_retrieval"]["items"]}
     if context["has_reference"]:
@@ -1517,9 +1615,8 @@ def finalize_agent_result(
         required_reference_shot_fields = {"source_time", "visual_blueprint", "subject_layout", "action_timing", "shot_size_camera", "lighting_color", "transition", "target_mapping"}
         if not isinstance(reference_shots, list) or not reference_shots or any(not isinstance(item, dict) or not required_reference_shot_fields.issubset(item) or any(not str(item[key]).strip() for key in required_reference_shot_fields) for item in reference_shots):
             raise RuntimeError("Agent 未逐段输出对标视频画面骨架，请重新分析")
-        expected_ranges = {str(item["source_time"]) for item in context["reference_video"].get("segments", [])}
-        returned_ranges = {str(item.get("source_time", "")) for item in reference_shots}
-        if expected_ranges and not expected_ranges.issubset(returned_ranges):
+        reference_duration = float(context.get("reference_video", {}).get("duration_seconds") or 0)
+        if not reference_ranges_cover_video(reference_shots, reference_duration):
             raise RuntimeError("Agent 未覆盖对标视频的全部镜头时间段，请重新分析")
     for shot in shots:
         method = shot.get("director_method") if isinstance(shot, dict) else None
@@ -1636,7 +1733,7 @@ def call_dsh_headless_agent(
             "重点分析主体轨迹、逐拍动作、构图、景别、机位、运镜、光色与切镜。"
             f"若有人物参考图，必须在同一个工具调用回合中并行调用 read_image：{json.dumps(portrait_paths, ensure_ascii=False)}。"
         )
-        output_rule = "shots 最多 4 项；每项 prompt 不超过 900 个汉字，其他单个文本字段不超过 220 个汉字。保持具体可执行，但不要重复同义描述。"
+        output_rule = "shots 必须跟随真实动作阶段和切点动态分段，通常 4–8 项，不得为了缩短输出合并关键动作；每项 prompt 不超过 900 个汉字，其他单个文本字段不超过 220 个汉字。保持具体可执行，但不要重复同义描述。"
     else:
         video_tool_rule = (
             "先调用 video_probe，再且只调用一次 video_analyze，显式传 maxFrames=18。"

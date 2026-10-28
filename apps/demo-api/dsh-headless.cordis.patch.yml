@@ -10,6 +10,6 @@
     frameQuality: 4
     sceneThreshold: 8
     askPaddingSec: 2
-    vlmMaxTokens: 900
+    vlmMaxTokens: 1600
     vlmTimeoutMs: 55000
     asrTimeoutMs: 120000

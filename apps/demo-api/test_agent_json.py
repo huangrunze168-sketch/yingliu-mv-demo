@@ -55,6 +55,53 @@ class AgentJsonParserTests(unittest.TestCase):
         for current, following in zip(segments, segments[1:]):
             self.assertEqual(current["end_seconds"], following["start_seconds"])
 
+    def test_normalizes_reference_breakdown_from_real_shot_matches(self) -> None:
+        result = {
+            "project_summary": "完整复刻对标动作",
+            "reference_breakdown": {"reference_shots": []},
+            "shots": [
+                {
+                    "reference_match": {
+                        "source_time": "00:00.000–00:05.000",
+                        "visual_blueprint": "人物正面站立",
+                        "subject_layout": "单人居中",
+                        "action_timing": "抬手后转身",
+                        "camera_motion": "中景固定机位",
+                        "transition": "连续动作",
+                    },
+                    "director_method": {"camera": "50mm 平视", "lighting_color": "冷白侧光"},
+                },
+                {
+                    "reference_match": {
+                        "source_time": "00:05.000–00:10.000",
+                        "visual_blueprint": "人物侧身离场",
+                        "subject_layout": "单人居中偏右",
+                        "action_timing": "向右移动并出画",
+                        "camera_motion": "中景轻微跟拍",
+                        "transition": "动作收尾",
+                    },
+                    "director_method": {"camera": "50mm 平视", "lighting_color": "冷白侧光"},
+                },
+            ],
+        }
+        context = {"has_reference": True, "reference_video": {"duration_seconds": 10.0}}
+        server.normalize_reference_breakdown(result, context)
+        reference_shots = result["reference_breakdown"]["reference_shots"]
+        self.assertEqual(len(reference_shots), 2)
+        self.assertEqual(reference_shots[0]["shot_size_camera"], "中景固定机位")
+        self.assertEqual(reference_shots[0]["lighting_color"], "冷白侧光")
+        self.assertTrue(server.reference_ranges_cover_video(reference_shots, 10.0))
+
+    def test_reference_coverage_accepts_action_based_segments(self) -> None:
+        shots = [
+            {"source_time": "00:00.000–00:04.500"},
+            {"source_time": "00:04.500–00:07.000"},
+            {"source_time": "00:07.000–00:10.000"},
+            {"source_time": "00:10.000–00:15.033"},
+        ]
+        self.assertTrue(server.reference_ranges_cover_video(shots, 15.033))
+        self.assertFalse(server.reference_ranges_cover_video(shots[:-1], 15.033))
+
     def test_dsh_headless_receives_workspace_and_video_tool_instructions(self) -> None:
         context = {
             "title": "测试",
@@ -92,7 +139,7 @@ class AgentJsonParserTests(unittest.TestCase):
             self.assertIn("不要再调用文件工具读取 agent-context.json", task)
             self.assertIn('"portrait1"', task)
             self.assertIn("同一个工具调用回合中并行调用 read_image", task)
-            self.assertIn("shots 最多 4 项", task)
+            self.assertIn("shots 必须跟随真实动作阶段和切点动态分段", task)
             self.assertIsNone(run.call_args.kwargs["timeout"])
             manifest = json.loads((directory / "agent-context.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["files"]["reference"], str((directory / "reference.mp4").resolve()))
