@@ -939,6 +939,56 @@ def reconcile_unknown_video_task(job_id: str, upstream_id: str) -> dict[str, Any
     return resumed
 
 
+def adopt_failed_video_task(job_id: str, upstream_id: str, new_client_request_id: str) -> dict[str, Any]:
+    """刷新页面后凭真实 task_id 认领已失败任务，再签发一次性重试授权。"""
+    state = read_state(job_id)
+    if state.get("status") != "failed":
+        raise ValueError("当前生成任务不是失败状态，无需认领")
+    if len(new_client_request_id) < 24 or len(new_client_request_id) > 200:
+        raise ValueError("新的请求身份无效，请刷新页面后重试")
+    model = upstream_model_name(state)
+    adapter = video_model_adapter(model)
+    tasks = state.get("upstream_tasks") if isinstance(state.get("upstream_tasks"), dict) else {}
+    matching_keys = [
+        key for key, item in tasks.items()
+        if isinstance(item, dict) and str(item.get("id") or "") == upstream_id
+    ]
+    unknown_keys = [
+        key for key, item in tasks.items()
+        if isinstance(item, dict) and item.get("submission_state") == "unknown" and not item.get("id")
+    ]
+    if len(matching_keys) == 1:
+        task_key = matching_keys[0]
+    elif not matching_keys and len(unknown_keys) == 1:
+        task_key = unknown_keys[0]
+    else:
+        raise ValueError("task_id 与当前项目的失败记录不匹配")
+    api_key = MODELSNEXUS_API_KEY if adapter.family == "seedance" else MINIMAX_API_KEY
+    if not api_key:
+        raise RuntimeError("ModelsNexus API 未配置")
+    response = api_json(urllib.request.Request(
+        adapter.status_url(upstream_id), headers=modelsnexus_headers(api_key),
+    ), timeout=60)
+    status, progress = adapter.status(response)
+    if status not in {"failed", "cancelled", "canceled", "error"}:
+        raise ValueError(f"ModelsNexus 任务当前为 {status or '未知'}，尚不能重新提交")
+    tasks[task_key].update({
+        "id": upstream_id, "status": status, "progress": progress,
+        "submission_state": "rejected",
+    })
+    retry_token = secrets.token_urlsafe(32)
+    updated = write_state(
+        job_id, upstream_tasks=tasks, status="failed", submission_state="rejected",
+        stage="ModelsNexus 已确认失败，可安全重新提交",
+        error=f"ModelsNexus 任务 {upstream_id} 已失败：{adapter.error_message(response)}",
+        upstream_task_id=upstream_id, upstream_status=status, can_retry=True,
+        client_request_id=new_client_request_id,
+        retry_token_sha256=hashlib.sha256(retry_token.encode("utf-8")).hexdigest(),
+    )
+    updated["retry_token"] = retry_token
+    return updated
+
+
 def retry_confirmed_failed_job(job_id: str, retry_token: str) -> dict[str, Any]:
     """仅对已核验失败的任务创建新尝试；旧任务记录永久归档。"""
     state = read_state(job_id)
@@ -992,6 +1042,13 @@ def wait_and_download_video(job_id: str, task_key: str, upstream_id: str, api_ke
             final_response = response
             break
         if status in {"failed", "cancelled", "canceled", "error"}:
+            if isinstance(tasks.get(task_key), dict):
+                tasks[task_key]["submission_state"] = "rejected"
+            write_state(
+                job_id, upstream_tasks=tasks, status="failed", submission_state="rejected",
+                stage="ModelsNexus 已确认生成失败", upstream_task_id=upstream_id,
+                upstream_status=status, can_retry=False,
+            )
             raise RuntimeError(f"上游视频生成失败：{adapter.error_message(response)}")
         time.sleep(adapter.poll_interval_seconds)
     video_url = adapter.download_url(final_response)
@@ -2745,6 +2802,9 @@ class Handler(BaseHTTPRequestHandler):
                 state.pop("signed_assets", None)
                 state.pop("media_assets", None)
                 state.pop("client_request_id", None)
+                state.pop("upstream_tasks", None)
+                state.pop("upstream_task_history", None)
+                state.pop("retry_token_sha256", None)
                 self.send_json(HTTPStatus.OK, state)
             except (ValueError, FileNotFoundError, IndexError):
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "任务不存在或已过期"})
@@ -2753,7 +2813,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         request_path = urlparse(self.path).path.rstrip("/")
-        recovery_match = re.fullmatch(r"/jobs/([0-9a-f]{32})/(reconcile|retry)", request_path)
+        recovery_match = re.fullmatch(r"/jobs/([0-9a-f]{32})/(reconcile|adopt|retry)", request_path)
         if recovery_match:
             try:
                 job_id, action = recovery_match.groups()
@@ -2763,13 +2823,20 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
                 state = read_state(job_id)
                 client_request_id = str(payload.get("client_request_id", ""))
-                if not secrets.compare_digest(client_request_id, str(state.get("client_request_id", ""))):
+                if action != "adopt" and not secrets.compare_digest(
+                    client_request_id, str(state.get("client_request_id", ""))
+                ):
                     raise PermissionError("无权恢复该生成任务")
-                if action == "reconcile":
+                if action in {"reconcile", "adopt"}:
                     upstream_id = str(payload.get("upstream_task_id", "")).strip()[:200]
                     if not upstream_id.startswith("task_"):
                         raise ValueError("请输入 ModelsNexus 任务详情中的 task_id")
-                    result = reconcile_unknown_video_task(job_id, upstream_id)
+                    if action == "adopt":
+                        result = adopt_failed_video_task(
+                            job_id, upstream_id, str(payload.get("new_client_request_id", "")).strip(),
+                        )
+                    else:
+                        result = reconcile_unknown_video_task(job_id, upstream_id)
                 else:
                     result = retry_confirmed_failed_job(job_id, str(payload.get("retry_token", "")))
                 result.pop("files", None)
@@ -2777,6 +2844,8 @@ class Handler(BaseHTTPRequestHandler):
                 result.pop("media_assets", None)
                 result.pop("client_request_id", None)
                 result.pop("retry_token_sha256", None)
+                result.pop("upstream_tasks", None)
+                result.pop("upstream_task_history", None)
                 self.send_json(HTTPStatus.OK, result)
             except PermissionError as exc:
                 self.send_json(HTTPStatus.FORBIDDEN, {"error": str(exc)})

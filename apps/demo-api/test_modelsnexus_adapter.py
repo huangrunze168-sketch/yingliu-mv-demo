@@ -117,6 +117,49 @@ class ModelsNexusAdapterTests(unittest.TestCase):
         self.assertEqual(result["upstream_task_history"][0]["tasks"]["clip-try01"]["id"], "task-failed")
         submit.assert_called_once_with(server.render_job, "job-1")
 
+    def test_failed_task_can_be_adopted_after_refresh(self) -> None:
+        state = {
+            "status": "failed", "submission_state": "preparing", "model": "sd2.5海外版-480p",
+            "client_request_id": "old-browser-request-id-that-is-long-enough",
+            "upstream_tasks": {"clip-try01": {
+                "id": "task-failed", "status": "failed", "submission_state": "submitted",
+            }},
+        }
+
+        def fake_write_state(_job_id: str, **updates):
+            state.update(updates)
+            return dict(state)
+
+        new_request_id = "new-browser-request-id-that-is-long-enough"
+        with patch.object(server, "read_state", return_value=state), \
+             patch.object(server, "write_state", side_effect=fake_write_state), \
+             patch.object(server, "MODELSNEXUS_API_KEY", "test-key"), \
+             patch.object(server, "api_json", return_value={"data": {
+                 "id": "task-failed", "status": "failed", "progress": 100,
+                 "error": "Video generation failed; the reservation is refunded.",
+             }}):
+            result = server.adopt_failed_video_task("job-1", "task-failed", new_request_id)
+
+        self.assertEqual(result["client_request_id"], new_request_id)
+        self.assertEqual(result["submission_state"], "rejected")
+        self.assertTrue(result["can_retry"])
+        self.assertTrue(result["retry_token"])
+
+    def test_failed_task_adoption_rejects_unrelated_task_id(self) -> None:
+        state = {
+            "status": "failed", "model": "sd2.5海外版-480p",
+            "upstream_tasks": {"clip-try01": {
+                "id": "task-real", "status": "failed", "submission_state": "submitted",
+            }},
+        }
+        with patch.object(server, "read_state", return_value=state), \
+             patch.object(server, "api_json") as api_json:
+            with self.assertRaisesRegex(ValueError, "不匹配"):
+                server.adopt_failed_video_task(
+                    "job-1", "task-other", "new-browser-request-id-that-is-long-enough",
+                )
+        api_json.assert_not_called()
+
     def test_reference_builder_only_returns_typed_urls(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = pathlib.Path(temporary)
