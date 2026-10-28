@@ -820,6 +820,39 @@
   transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
 }
 
+.mv-upload-entry {
+  position: relative;
+  min-width: 0;
+}
+
+.mv-upload-entry .mv-upload-card {
+  height: 100%;
+}
+
+.mv-upload-entry.is-ready .mv-upload-card {
+  padding-right: 76px;
+}
+
+.mv-upload-remove {
+  position: absolute;
+  z-index: 3;
+  right: 14px;
+  bottom: 14px;
+  padding: 5px 9px;
+  border: 1px solid rgba(255, 111, 103, 0.26);
+  border-radius: 8px;
+  color: rgba(255, 155, 149, 0.8);
+  background: rgba(255, 91, 82, 0.07);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.mv-upload-remove:hover {
+  border-color: rgba(255, 111, 103, 0.55);
+  color: #ffaaa4;
+  background: rgba(255, 91, 82, 0.14);
+}
+
 .mv-upload-card:hover {
   transform: translateY(-2px);
   border-color: rgba(216, 255, 99, 0.44);

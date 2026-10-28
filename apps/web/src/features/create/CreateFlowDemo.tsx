@@ -500,6 +500,16 @@ export function CreateFlowDemo() {
     setNotice('已删除该人物参考图，其余参考图保持同级。');
   };
 
+  const removeFile = (key: Exclude<AssetKey, 'portrait'>, title: string) => {
+    const nextAssets = { ...assets, [key]: null };
+    setAssets(nextAssets);
+    persistProjectAssetState(nextAssets, `${title}已从当前项目删除。`);
+    setAgentAnalysis(null);
+    setAgentAnalysisComplete(false);
+    setAgentAnalysisError('');
+    setNotice(`已取消${title}，下次 Agent 分析和生成将不再使用该素材。`);
+  };
+
   const changeModel = (nextModel: ModelName) => {
     setModel(nextModel);
     const allowed = modelProfiles[nextModel].resolutions.map(([value]) => value as string);
@@ -959,12 +969,15 @@ export function CreateFlowDemo() {
                     </div>
                   );
                   return (
-                    <label className={`mv-upload-card ${ready ? 'is-ready' : ''}`} key={item.key}>
-                      <input type="file" accept={item.accept} onChange={event => selectFile(item.key as Exclude<AssetKey, 'portrait'>, event.target.files?.[0])} />
-                      <span className="mv-upload-icon">{ready ? '✓' : '＋'}</span>
-                      <span className="mv-upload-copy"><b>{item.title}{item.required ? ' *' : ''}</b><small>{file ? `${file.name} · ${prettySize(file.size)}` : item.copy}</small></span>
-                      <em>{file ? '更换' : item.tag}</em>
-                    </label>
+                    <div className={`mv-upload-entry ${ready ? 'is-ready' : ''}`} key={item.key}>
+                      <label className={`mv-upload-card ${ready ? 'is-ready' : ''}`}>
+                        <input type="file" accept={item.accept} onChange={event => { selectFile(item.key as Exclude<AssetKey, 'portrait'>, event.target.files?.[0]); event.currentTarget.value = ''; }} />
+                        <span className="mv-upload-icon">{ready ? '✓' : '＋'}</span>
+                        <span className="mv-upload-copy"><b>{item.title}{item.required ? ' *' : ''}</b><small>{file ? `${file.name} · ${prettySize(file.size)}` : item.copy}</small></span>
+                        <em>{file ? '更换' : item.tag}</em>
+                      </label>
+                      {file && <button className="mv-upload-remove" type="button" aria-label={`取消${item.title}`} onClick={() => removeFile(item.key as Exclude<AssetKey, 'portrait'>, item.title)}>取消</button>}
+                    </div>
                   );
                 })}
               </div>
