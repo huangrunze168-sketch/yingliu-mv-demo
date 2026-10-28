@@ -268,7 +268,8 @@ function createClientRequestId() {
 export function CreateFlowDemo() {
   const submissionLockRef = useRef(false);
   const submissionRequestIdRef = useRef<string | null>(null);
-  const [pageView, setPageView] = useState<'projects' | 'workflow'>('workflow');
+  // 公网首页先展示真实项目库；只有新建或打开项目后才进入制作工作流。
+  const [pageView, setPageView] = useState<'projects' | 'workflow'>('projects');
   const [projectSearch, setProjectSearch] = useState('');
   const [projectFilter, setProjectFilter] = useState<'all' | 'active' | 'done'>('all');
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
