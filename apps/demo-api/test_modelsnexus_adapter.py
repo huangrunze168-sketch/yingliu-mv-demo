@@ -14,6 +14,21 @@ SPEC.loader.exec_module(server)
 
 
 class ModelsNexusAdapterTests(unittest.TestCase):
+    def test_generation_executor_allows_multiple_projects(self) -> None:
+        self.assertGreaterEqual(server.GENERATION_WORKERS, 2)
+
+    def test_project_library_reflects_live_job_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            projects_file = pathlib.Path(temporary) / "projects.json"
+            projects_file.write_text('[{"id":"p1","name":"并行项目","job_id":"abc"}]', encoding="utf-8")
+            with patch.object(server, "PROJECTS_FILE", projects_file), \
+                 patch.object(server, "read_state", return_value={
+                     "status": "processing", "progress": 47,
+                 }):
+                projects = server.read_projects()
+        self.assertEqual(projects[0]["status"], "正在生成")
+        self.assertEqual(projects[0]["progress"], 47)
+
     def test_http_error_exposes_status_and_submission_certainty(self) -> None:
         rejected = server.UpstreamHTTPError(400, "bad request", "request-400")
         unknown = server.UpstreamHTTPError(502, "bad gateway", "request-502")

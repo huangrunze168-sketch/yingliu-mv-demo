@@ -59,7 +59,8 @@ DSH_TIMEOUT_SECONDS = int(os.environ.get("DSH_TIMEOUT_SECONDS", "900"))
 
 DATA_ROOT.mkdir(parents=True, exist_ok=True)
 PROJECTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yingliu-demo")
+GENERATION_WORKERS = max(2, min(8, int(os.environ.get("YINGLIU_GENERATION_WORKERS", "4"))))
+EXECUTOR = ThreadPoolExecutor(max_workers=GENERATION_WORKERS, thread_name_prefix="yingliu-demo")
 JOBS_LOCK = threading.Lock()
 PROJECTS_LOCK = threading.Lock()
 
@@ -292,7 +293,28 @@ def _write_projects_unlocked(projects: list[dict[str, Any]]) -> None:
 
 def read_projects() -> list[dict[str, Any]]:
     with PROJECTS_LOCK:
-        return _read_projects_unlocked()
+        projects = _read_projects_unlocked()
+    enriched: list[dict[str, Any]] = []
+    for item in projects:
+        project = dict(item)
+        job_id = str(project.get("job_id") or "")
+        if job_id:
+            try:
+                job = read_state(job_id)
+                job_status = str(job.get("status") or "")
+                project["progress"] = max(0, min(100, int(job.get("progress") or 0)))
+                if job_status == "completed":
+                    project["status"] = "已完成"
+                    project["result_url"] = job.get("result_url", "")
+                    project["progress"] = 100
+                elif job_status == "failed":
+                    project["status"] = "生成失败"
+                elif job_status in {"queued", "processing"}:
+                    project["status"] = "正在生成"
+            except (ValueError, FileNotFoundError, json.JSONDecodeError):
+                pass
+        enriched.append(project)
+    return enriched
 
 
 def sanitize_project(payload: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:

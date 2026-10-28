@@ -519,6 +519,9 @@ export function CreateFlowDemo() {
 
   const loadProject = (project: ProjectRecord) => {
     const loadSequence = ++assetLoadSequenceRef.current;
+    submissionLockRef.current = false;
+    submissionRequestIdRef.current = null;
+    setRetryToken('');
     setActiveProjectId(project.id);
     setProjectName(project.name);
     setRatio(project.ratio);
@@ -558,12 +561,20 @@ export function CreateFlowDemo() {
     setJob(project.job_id
       ? { id: project.job_id, status: project.result_url ? 'completed' : 'queued', progress: project.result_url ? 100 : Math.max(5, project.progress || 5), result_url: project.result_url }
       : null);
+    setRunning(project.status === '正在生成');
+    setRunProgress(project.progress || 0);
+    setRunStage(project.status === '正在生成' ? '项目正在服务器后台生成' : project.status);
     setPageView('workflow');
     setNotice(`已从服务器打开项目「${project.name}」，正在恢复项目素材…`);
   };
 
   const createProject = async () => {
     assetLoadSequenceRef.current += 1;
+    submissionLockRef.current = false;
+    submissionRequestIdRef.current = null;
+    setRetryToken('');
+    setRunning(false);
+    setJob(null);
     setAssetHydrating(false);
     const draft = {
       name: '未命名 MV', ratio: '16:9', model: 'Seedance 2.5 · 海外版' as ModelName,
@@ -763,7 +774,23 @@ export function CreateFlowDemo() {
       setJob(payload);
       setRunProgress(Math.max(10, 10 + Math.round((payload.progress || 0) * 0.9)));
       setRunStage('任务已进入服务端生成队列');
-      setNotice('任务已进入服务器生成队列，页面会自动更新进度。');
+      if (activeProjectId) {
+        const saveResponse = await fetch(`/yingliu-demo-api/projects/${activeProjectId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: projectName || '未命名 MV', ratio, model, resolution, director, requirements,
+            status: '正在生成', progress: payload.progress || 5,
+            shots: agentAnalysis?.shots?.length || 0,
+            active_step: 2, agent_analysis: agentAnalysis, job_id: payload.id,
+          }),
+        });
+        if (saveResponse.ok) {
+          const saved = await saveResponse.json() as ProjectRecord;
+          setProjects(current => [saved, ...current.filter(item => item.id !== saved.id)]);
+        }
+      }
+      setNotice('任务已在服务器后台生成。现在可以返回项目库，继续提交其他项目。');
     } catch (error) {
       setRunning(false);
       setRunStage('生成任务创建失败');
