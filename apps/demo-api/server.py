@@ -919,12 +919,16 @@ def reconcile_unknown_video_task(job_id: str, upstream_id: str) -> dict[str, Any
     tasks[task_key].update({"id": upstream_id, "status": status, "progress": progress})
     if status in {"failed", "cancelled", "canceled", "error"}:
         tasks[task_key]["submission_state"] = "rejected"
-        return write_state(
+        retry_token = secrets.token_urlsafe(32)
+        updated = write_state(
             job_id, upstream_tasks=tasks, status="failed", submission_state="rejected",
             stage="ModelsNexus 已确认失败，可安全重新提交",
             error=f"ModelsNexus 任务 {upstream_id} 已失败：{adapter.error_message(response)}",
             upstream_task_id=upstream_id, upstream_status=status, can_retry=True,
+            retry_token_sha256=hashlib.sha256(retry_token.encode("utf-8")).hexdigest(),
         )
+        updated["retry_token"] = retry_token
+        return updated
     tasks[task_key]["submission_state"] = "submitted"
     resumed = write_state(
         job_id, upstream_tasks=tasks, status="processing", submission_state="submitted",
@@ -935,11 +939,15 @@ def reconcile_unknown_video_task(job_id: str, upstream_id: str) -> dict[str, Any
     return resumed
 
 
-def retry_confirmed_failed_job(job_id: str) -> dict[str, Any]:
+def retry_confirmed_failed_job(job_id: str, retry_token: str) -> dict[str, Any]:
     """仅对已核验失败的任务创建新尝试；旧任务记录永久归档。"""
     state = read_state(job_id)
     if state.get("status") != "failed" or state.get("submission_state") != "rejected" or not state.get("can_retry"):
         raise ValueError("上游失败尚未核验，禁止重新提交")
+    expected_token_hash = str(state.get("retry_token_sha256") or "")
+    actual_token_hash = hashlib.sha256(retry_token.encode("utf-8")).hexdigest()
+    if not expected_token_hash or not secrets.compare_digest(expected_token_hash, actual_token_hash):
+        raise PermissionError("重试授权已失效，请重新核验 ModelsNexus 任务")
     history = state.get("upstream_task_history") if isinstance(state.get("upstream_task_history"), list) else []
     history.append({
         "attempt": int(state.get("generation_attempt") or 1),
@@ -951,7 +959,7 @@ def retry_confirmed_failed_job(job_id: str) -> dict[str, Any]:
         job_id, status="queued", stage=f"第 {attempt} 次生成已进入队列", progress=5,
         submission_state="not_started", generation_attempt=attempt,
         upstream_task_history=history, upstream_tasks={}, upstream_task_id="",
-        upstream_status="", can_retry=False, error="",
+        upstream_status="", can_retry=False, retry_token_sha256="", error="",
     )
     EXECUTOR.submit(render_job, job_id)
     return updated
@@ -2763,11 +2771,12 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("请输入 ModelsNexus 任务详情中的 task_id")
                     result = reconcile_unknown_video_task(job_id, upstream_id)
                 else:
-                    result = retry_confirmed_failed_job(job_id)
+                    result = retry_confirmed_failed_job(job_id, str(payload.get("retry_token", "")))
                 result.pop("files", None)
                 result.pop("signed_assets", None)
                 result.pop("media_assets", None)
                 result.pop("client_request_id", None)
+                result.pop("retry_token_sha256", None)
                 self.send_json(HTTPStatus.OK, result)
             except PermissionError as exc:
                 self.send_json(HTTPStatus.FORBIDDEN, {"error": str(exc)})

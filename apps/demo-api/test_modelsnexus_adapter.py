@@ -66,6 +66,57 @@ class ModelsNexusAdapterTests(unittest.TestCase):
             self.assertEqual(state["upstream_tasks"]["task-1"]["submission_state"], "rejected")
             self.assertEqual(server.submit_video_task("job-1", "task-1", payload, "api-key", adapter), "task-ok")
 
+    def test_confirmed_upstream_failure_issues_one_time_retry_token(self) -> None:
+        state = {
+            "status": "failed", "submission_state": "unknown", "model": "sd2.5海外版-480p",
+            "upstream_tasks": {"clip-try01": {"submission_state": "unknown"}},
+        }
+
+        def fake_write_state(_job_id: str, **updates):
+            state.update(updates)
+            return dict(state)
+
+        with patch.object(server, "read_state", return_value=state), \
+             patch.object(server, "write_state", side_effect=fake_write_state), \
+             patch.object(server, "MODELSNEXUS_API_KEY", "test-key"), \
+             patch.object(server, "api_json", return_value={"data": {"status": "failed", "progress": 100}}):
+            result = server.reconcile_unknown_video_task("job-1", "task-failed")
+
+        self.assertTrue(result["can_retry"])
+        self.assertTrue(result["retry_token"])
+        self.assertEqual(state["upstream_tasks"]["clip-try01"]["id"], "task-failed")
+        self.assertEqual(state["upstream_tasks"]["clip-try01"]["submission_state"], "rejected")
+        self.assertEqual(
+            state["retry_token_sha256"],
+            server.hashlib.sha256(result["retry_token"].encode("utf-8")).hexdigest(),
+        )
+
+    def test_retry_requires_token_and_creates_a_new_attempt(self) -> None:
+        retry_token = "single-use-token"
+        state = {
+            "status": "failed", "submission_state": "rejected", "can_retry": True,
+            "generation_attempt": 1,
+            "retry_token_sha256": server.hashlib.sha256(retry_token.encode("utf-8")).hexdigest(),
+            "upstream_tasks": {"clip-try01": {"id": "task-failed", "status": "failed"}},
+        }
+
+        def fake_write_state(_job_id: str, **updates):
+            state.update(updates)
+            return dict(state)
+
+        with patch.object(server, "read_state", return_value=state), \
+             patch.object(server, "write_state", side_effect=fake_write_state), \
+             patch.object(server.EXECUTOR, "submit") as submit:
+            with self.assertRaises(PermissionError):
+                server.retry_confirmed_failed_job("job-1", "wrong-token")
+            result = server.retry_confirmed_failed_job("job-1", retry_token)
+
+        self.assertEqual(result["generation_attempt"], 2)
+        self.assertEqual(result["submission_state"], "not_started")
+        self.assertEqual(result["upstream_tasks"], {})
+        self.assertEqual(result["upstream_task_history"][0]["tasks"]["clip-try01"]["id"], "task-failed")
+        submit.assert_called_once_with(server.render_job, "job-1")
+
     def test_reference_builder_only_returns_typed_urls(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = pathlib.Path(temporary)
