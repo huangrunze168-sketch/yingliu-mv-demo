@@ -632,7 +632,62 @@ def video_model_adapter(model: str) -> ModelsNexusVideoAdapter:
         raise ValueError(f"当前视频 API 未配置模型：{model}") from exc
 
 
+def has_reference_replacement_materials(state: dict[str, Any]) -> bool:
+    """只有同时提供人物图和对标视频时，才启用逐帧人物替换合同。"""
+    files = state.get("files") if isinstance(state.get("files"), dict) else {}
+    has_reference = "reference" in files
+    has_portrait = any(key == "portrait" or key.startswith("portrait_") for key in files)
+    return has_reference and has_portrait
+
+
+def generation_execution_contract(state: dict[str, Any]) -> str:
+    """生成模型必须首先执行的全局合同，不能被分镜提示词覆盖。"""
+    requirements = str(state.get("requirements", "")).strip()
+    sections = [
+        "[用户原始制作要求｜最高优先级]",
+        requirements or "未填写额外制作要求；严格执行下方分镜与已提供素材约束。",
+    ]
+    files = state.get("files") if isinstance(state.get("files"), dict) else {}
+    has_portrait = any(key == "portrait" or key.startswith("portrait_") for key in files)
+    has_reference = "reference" in files
+    if has_portrait and has_reference:
+        sections.extend([
+            "[人物替换硬约束｜VIDEO-TO-VIDEO CHARACTER REPLACEMENT]",
+            "人物参考图是最终人物身份、脸部、发型、年龄、体态与服装的唯一合法来源，所有人物参考图同级。",
+            "对标视频只提供场景布局、人物位置、动作时序、表演节拍、景别、机位、运镜、光影、特效与切镜时间，不提供最终人物身份。",
+            "必须在每一帧把对标视频中的原片人物完整替换为人物参考图中的人物；禁止保留或复刻原片人物的脸、发型、年龄、体态、服装和身份特征。",
+            "分镜或对标蓝图中出现的原片人物外貌与服装文字只用于定位动作载体，绝不是正向生成人物描述；发生冲突时人物参考图和用户原始制作要求绝对优先。",
+        ])
+    elif has_portrait:
+        sections.extend([
+            "[人物身份硬约束]",
+            "人物参考图是最终人物身份、脸部、发型、年龄、体态与服装的唯一合法来源；全片逐帧保持一致。",
+        ])
+    elif has_reference:
+        sections.extend([
+            "[对标视频执行约束]",
+            "对标视频提供场景布局、动作时序、景别、机位、运镜、光影、特效与切镜时间，严格按用户原始制作要求决定哪些内容保留或改写。",
+        ])
+    return "\n".join(sections)
+
+
+def validate_generation_payload_contract(state: dict[str, Any], payload: dict[str, Any]) -> None:
+    """在产生付费请求前阻断人物替换合同或参考素材缺失的请求。"""
+    if not has_reference_replacement_materials(state):
+        return
+    prompt = str(payload.get("prompt", ""))
+    if not payload.get("referenceImages") or not payload.get("referenceVideos"):
+        raise ValueError("人物替换任务必须同时提交人物参考图和对标视频，已在调用模型前终止")
+    required_phrases = ("用户原始制作要求", "人物替换硬约束", "禁止保留或复刻原片人物")
+    if any(phrase not in prompt for phrase in required_phrases):
+        raise ValueError("人物替换任务的最终提示词缺少身份替换硬约束，已在调用模型前终止")
+    requirements = str(state.get("requirements", "")).strip()
+    if requirements and requirements not in prompt:
+        raise ValueError("最终提示词丢失用户原始制作要求，已在调用模型前终止")
+
+
 def build_generation_prompt(state: dict[str, Any]) -> str:
+    contract = generation_execution_contract(state)
     plan = state.get("generation_plan")
     shots = plan.get("shots") if isinstance(plan, dict) else None
     if isinstance(shots, list) and shots:
@@ -645,9 +700,9 @@ def build_generation_prompt(state: dict[str, Any]) -> str:
             if prompt:
                 parts.append(f"{shot.get('id', '')} {prompt}" + (f"\n负面约束：{negative}" if negative else ""))
         if parts:
-            return ("生成一支连续音乐 MV，严格按以下时间轴逐镜执行，保持人物身份、服装、场景和动作连续；"
+            return (contract + "\n\n生成一支连续音乐 MV，严格按以下时间轴逐镜执行，保持人物身份、服装、场景和动作连续；"
                     "画面不得出现字幕、水印或歌词文字。\n\n" + "\n\n".join(parts))[:32000]
-    return str(state.get("requirements", "")).strip()[:32000]
+    return contract[:32000]
 
 
 def create_equal_reference_sheet(paths: list[pathlib.Path], output: pathlib.Path, width: int, height: int) -> None:
@@ -1156,8 +1211,11 @@ def prompt_for_window(state: dict[str, Any], start: float, end: float) -> str:
                 negative = str(shot.get("negative_prompt", "")).strip()
                 if prompt:
                     selected.append(prompt + (f"\n负面约束：{negative}" if negative else ""))
-    segment_prompt = "\n\n".join(selected) or build_generation_prompt(state)
-    return (f"本段生成时间窗 {format_timestamp(start)}–{format_timestamp(end)}。"
+    segment_prompt = "\n\n".join(selected)
+    if not segment_prompt:
+        return build_generation_prompt(state)
+    contract = generation_execution_contract(state)
+    return (f"{contract}\n\n本段生成时间窗 {format_timestamp(start)}–{format_timestamp(end)}。"
             "严格保持人物身份、服装、场景和前后段连续；不得出现字幕、水印或歌词文字。\n"
             f"{segment_prompt}")[:32000]
 
@@ -1202,6 +1260,7 @@ def generate_upstream_job(job_id: str) -> None:
             write_state(job_id, stage="正在创建 ModelsNexus 可拉取的短时素材链接", progress=16)
             references = build_model_references(job_id, directory, files)
             payload = adapter.build_payload(prompt, ratio, requested_duration, references)
+            validate_generation_payload_contract(state, payload)
             task_key = f"{adapter.task_namespace}-main{attempt_suffix}"
             upstream_id = submit_video_task(job_id, task_key, payload, MODELSNEXUS_API_KEY, adapter)
             upstream_output = directory / "upstream.mp4"
@@ -1230,6 +1289,7 @@ def generate_upstream_job(job_id: str) -> None:
                 segment_prompt = prompt_for_window(state, cursor, min(duration, cursor + segment_duration))
                 references = build_model_references(job_id, directory, files)
                 payload = adapter.build_payload(segment_prompt, ratio, segment_duration, references)
+                validate_generation_payload_contract(state, payload)
                 upstream_id = submit_video_task(job_id, task_key, payload, MINIMAX_API_KEY, adapter)
                 clip = directory / f"upstream-{index + 1:02d}.mp4"
                 wait_and_download_video(job_id, task_key, upstream_id, MINIMAX_API_KEY, clip,
@@ -2136,7 +2196,7 @@ def finalize_agent_result(
                 raise RuntimeError("分镜未写明对标视频画面复刻约束，请重新分析")
             source_time = str(reference_match["source_time"]).strip()
             locked_blueprint = (
-                f"[对标画面 {source_time}] "
+                f"[对标画面 {source_time}｜仅作为非身份画面骨架] "
                 f"画面：{reference_match['visual_blueprint']}；"
                 f"布局：{reference_match['subject_layout']}；"
                 f"动作：{reference_match['action_timing']}；"
@@ -2145,6 +2205,18 @@ def finalize_agent_result(
             )
             if any(str(reference_match[key]).strip() not in prompt for key in required_match_fields):
                 prompt = f"{locked_blueprint} {prompt}".strip()
+            if int(context.get("portrait_count") or 0) > 0:
+                replacement_rule = (
+                    "[人物替换硬约束] 本镜必须逐帧用人物参考图中的人物完整替换对标视频原片人物；"
+                    "只保留原片的布局、动作、表演节拍、摄影、光影、特效和切镜，"
+                    "禁止保留原片人物的脸、发型、年龄、体态、服装与身份。"
+                )
+                if "[人物替换硬约束]" not in prompt:
+                    prompt = f"{replacement_rule} {prompt}".strip()
+                negative = str(shot.get("negative_prompt", "")).strip()
+                source_identity_negative = "原片人物脸、原片人物发型、原片人物服装、原片人物身份残留"
+                if source_identity_negative not in negative:
+                    shot["negative_prompt"] = f"{source_identity_negative}，{negative}".strip("，")
         shot["prompt"] = prompt
     result["corpus_retrieval"] = context["corpus_retrieval"]
     result["material_manifest"] = {
@@ -2516,10 +2588,12 @@ def call_dsh_headless_agent(
 执行规则：
 1. 如果 context.reference_video.isolated_analysis 存在，它是上一阶段只看对标视频得到的权威蓝图。禁止调用 video_probe、video_analyze 或 video_ask，也禁止重新解释对标视频；必须逐段复制 isolated_analysis.timeline_segments 的 source_time、visual_blueprint、subject_layout、action_timing、shot_size_camera、lighting_color 和 transition。
 2. context.portrait_analysis 是上一阶段只看人物图得到的权威身份与服装约束。禁止再次调用 read_image；人物分析只能替换蓝图中的人物身份与服装，绝不能提供背景、动作、构图或摄影信息。
+   同时存在人物图和对标视频时，这是人物替换任务：人物图是最终人物身份、脸部、发型、年龄、体态和服装的唯一合法来源；对标蓝图中的原片人物外貌与服装只代表动作占位，绝不能作为正向人物描述。
 3. 对标视频隔离蓝图决定画面几何、动作、运镜和切镜；导演方法和电影语料只能增强光色、质感和叙事，不能覆盖蓝图。
 4. reference_breakdown.reference_shots 必须逐项覆盖 context.reference_video.isolated_analysis.timeline_segments，source_time 必须逐字复制，不能漏段；每个 shots.reference_match 也必须引用其中一个完全相同的 source_time，并逐字继承该段画面约束。
 5. 每条 shots.prompt 必须以对应时间轴和歌词开头，并写入 reference_match.source_time；不得出现导演姓名、电影语料编号、字幕或水印。
    若存在隔离蓝图，prompt 正文必须完整写入对应段的 visual_blueprint、subject_layout、action_timing、shot_size_camera 和 transition，而不是只写“参考对标视频”。
+   同时存在人物图和对标视频时，每条 prompt 还必须明确写出“用人物参考图人物逐帧替换原片人物，禁止保留原片人物身份”；negative_prompt 必须排除原片人物脸、发型、服装和身份残留。
 6. 每镜 corpus_refs 至少选择 3 个 context.corpus_retrieval.items 中真实存在的 id，但这些 id 只能出现在 corpus_refs 元数据。
 7. 三路准备已通过 context.parallel_preparation.barrier_passed 汇总屏障。禁止调用任何媒体或文件工具，不要修改、删除或移动用户文件，不要发起视频生成。
 8. 输出规模：{output_rule}
@@ -2553,7 +2627,7 @@ shots 必须覆盖完整规划时长，且每条 prompt 都必须独立完整。
 def call_deepseek_agent(context: dict[str, Any], image_inputs: list[dict[str, str]]) -> dict[str, Any]:
     if not DEEPSEEK_API_KEY:
         raise RuntimeError("DeepSeek Agent 未配置")
-    system_prompt = """你是专业音乐 MV 制作 Agent。所有上传物料均为可选项。你必须先识别本次实际提供了哪些物料，只分析真实存在的用户需求、歌曲、歌词、同级人物参考图、对标视频和参考音色；未提供的物料必须明确标记为未提供，并依靠制作需求、导演库与电影语料补全创作方案，绝不能假装已经读取。若提供对标视频，它是本次生成的权威画面骨架：按时间顺序拆解并尽量复刻每段的具体画面布局、主体数量与位置、前中后景关系、动作顺序和节拍、景别、机位、镜头运动方向以及切镜时间；只按照用户上传物料替换人物身份、服装、场景语义、文字和品牌元素。导演库与电影语料是第二层修辞增强，只用于把这个画面骨架润色为可执行的光线、色彩、质感、摄影和叙事表达，不得擅自改掉对标画面的关键几何关系、动作节奏和镜头时序。导演姓名只是方法库索引，绝不能用“某某风格”“采用某导演方法”或在提示词里附加导演姓名来代替执行。不要输出分析过程。只输出合法 JSON，结构严格为：
+    system_prompt = """你是专业音乐 MV 制作 Agent。所有上传物料均为可选项。你必须先识别本次实际提供了哪些物料，只分析真实存在的用户需求、歌曲、歌词、同级人物参考图、对标视频和参考音色；未提供的物料必须明确标记为未提供，并依靠制作需求、导演库与电影语料补全创作方案，绝不能假装已经读取。用户原始制作要求是最高优先级，后续分镜与语料增强不得覆盖或遗漏。若提供对标视频，它是本次生成的权威画面骨架：按时间顺序拆解并尽量复刻每段的具体画面布局、主体数量与位置、前中后景关系、动作顺序和节拍、景别、机位、镜头运动方向以及切镜时间；只按照用户上传物料替换人物身份、服装、场景语义、文字和品牌元素。同时存在人物参考图和对标视频时，这是人物替换任务：人物图是最终人物身份、脸部、发型、年龄、体态和服装的唯一合法来源；对标视频中的原片人物只作为动作与空间占位，必须逐帧替换，禁止把原片人物外貌或服装写成正向生成要求。导演库与电影语料是第二层修辞增强，只用于把这个画面骨架润色为可执行的光线、色彩、质感、摄影和叙事表达，不得擅自改掉对标画面的关键几何关系、动作节奏和镜头时序。导演姓名只是方法库索引，绝不能用“某某风格”“采用某导演方法”或在提示词里附加导演姓名来代替执行。不要输出分析过程。只输出合法 JSON，结构严格为：
 {
   "project_summary": "一句话项目判断",
   "creative_brief": "完整创作策略",
