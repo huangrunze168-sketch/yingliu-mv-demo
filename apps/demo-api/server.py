@@ -17,6 +17,7 @@ import mimetypes
 import os
 import pathlib
 import re
+import secrets
 import signal
 import shutil
 import subprocess
@@ -895,6 +896,67 @@ def submit_video_task(job_id: str, task_key: str, payload: dict[str, Any], api_k
     return upstream_id
 
 
+def reconcile_unknown_video_task(job_id: str, upstream_id: str) -> dict[str, Any]:
+    """用 ModelsNexus task_id 核验 5xx 未知提交；只查询，绝不创建新任务。"""
+    state = read_state(job_id)
+    model = upstream_model_name(state)
+    adapter = video_model_adapter(model)
+    tasks = state.get("upstream_tasks") if isinstance(state.get("upstream_tasks"), dict) else {}
+    unknown_keys = [
+        key for key, item in tasks.items()
+        if isinstance(item, dict) and item.get("submission_state") == "unknown"
+    ]
+    if len(unknown_keys) != 1:
+        raise ValueError("当前任务不存在唯一的待核验上游提交")
+    task_key = unknown_keys[0]
+    api_key = MODELSNEXUS_API_KEY if adapter.family == "seedance" else MINIMAX_API_KEY
+    if not api_key:
+        raise RuntimeError("ModelsNexus API 未配置")
+    response = api_json(urllib.request.Request(
+        adapter.status_url(upstream_id), headers=modelsnexus_headers(api_key),
+    ), timeout=60)
+    status, progress = adapter.status(response)
+    tasks[task_key].update({"id": upstream_id, "status": status, "progress": progress})
+    if status in {"failed", "cancelled", "canceled", "error"}:
+        tasks[task_key]["submission_state"] = "rejected"
+        return write_state(
+            job_id, upstream_tasks=tasks, status="failed", submission_state="rejected",
+            stage="ModelsNexus 已确认失败，可安全重新提交",
+            error=f"ModelsNexus 任务 {upstream_id} 已失败：{adapter.error_message(response)}",
+            upstream_task_id=upstream_id, upstream_status=status, can_retry=True,
+        )
+    tasks[task_key]["submission_state"] = "submitted"
+    resumed = write_state(
+        job_id, upstream_tasks=tasks, status="processing", submission_state="submitted",
+        stage=f"已找回 ModelsNexus 任务 · {status or 'queued'}", error="",
+        upstream_task_id=upstream_id, upstream_status=status or "queued", can_retry=False,
+    )
+    EXECUTOR.submit(generate_upstream_job, job_id)
+    return resumed
+
+
+def retry_confirmed_failed_job(job_id: str) -> dict[str, Any]:
+    """仅对已核验失败的任务创建新尝试；旧任务记录永久归档。"""
+    state = read_state(job_id)
+    if state.get("status") != "failed" or state.get("submission_state") != "rejected" or not state.get("can_retry"):
+        raise ValueError("上游失败尚未核验，禁止重新提交")
+    history = state.get("upstream_task_history") if isinstance(state.get("upstream_task_history"), list) else []
+    history.append({
+        "attempt": int(state.get("generation_attempt") or 1),
+        "tasks": state.get("upstream_tasks", {}),
+        "finished_at": int(time.time()),
+    })
+    attempt = int(state.get("generation_attempt") or 1) + 1
+    updated = write_state(
+        job_id, status="queued", stage=f"第 {attempt} 次生成已进入队列", progress=5,
+        submission_state="not_started", generation_attempt=attempt,
+        upstream_task_history=history, upstream_tasks={}, upstream_task_id="",
+        upstream_status="", can_retry=False, error="",
+    )
+    EXECUTOR.submit(render_job, job_id)
+    return updated
+
+
 def wait_and_download_video(job_id: str, task_key: str, upstream_id: str, api_key: str, output: pathlib.Path,
                             base_progress: int, progress_span: int, adapter: ModelsNexusVideoAdapter) -> None:
     final_response: dict[str, Any] = {}
@@ -996,6 +1058,7 @@ def generate_upstream_job(job_id: str) -> None:
             raise ValueError("缺少 Agent 生成提示词")
         write_state(job_id, status="processing", stage="准备 ModelsNexus 固定参数", progress=12,
                     upstream_model=model, submission_state="preparing")
+        attempt_suffix = f"-try{max(1, int(state.get('generation_attempt') or 1)):02d}"
 
         if adapter.family == "seedance":
             if not MODELSNEXUS_API_KEY:
@@ -1005,7 +1068,7 @@ def generate_upstream_job(job_id: str) -> None:
             write_state(job_id, stage="正在创建 ModelsNexus 可拉取的短时素材链接", progress=16)
             references = build_model_references(job_id, directory, files)
             payload = adapter.build_payload(prompt, ratio, requested_duration, references)
-            task_key = f"{adapter.task_namespace}-main"
+            task_key = f"{adapter.task_namespace}-main{attempt_suffix}"
             upstream_id = submit_video_task(job_id, task_key, payload, MODELSNEXUS_API_KEY, adapter)
             upstream_output = directory / "upstream.mp4"
             wait_and_download_video(
@@ -1029,7 +1092,7 @@ def generate_upstream_job(job_id: str) -> None:
             cursor = 0.0
             for index, segment_duration in enumerate(durations):
                 adapter.validate(ratio, segment_duration)
-                task_key = f"{adapter.task_namespace}-{index + 1:02d}"
+                task_key = f"{adapter.task_namespace}-{index + 1:02d}{attempt_suffix}"
                 segment_prompt = prompt_for_window(state, cursor, min(duration, cursor + segment_duration))
                 references = build_model_references(job_id, directory, files)
                 payload = adapter.build_payload(segment_prompt, ratio, segment_duration, references)
@@ -2673,6 +2736,7 @@ class Handler(BaseHTTPRequestHandler):
                 state.pop("debug", None)
                 state.pop("signed_assets", None)
                 state.pop("media_assets", None)
+                state.pop("client_request_id", None)
                 self.send_json(HTTPStatus.OK, state)
             except (ValueError, FileNotFoundError, IndexError):
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "任务不存在或已过期"})
@@ -2681,6 +2745,37 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         request_path = urlparse(self.path).path.rstrip("/")
+        recovery_match = re.fullmatch(r"/jobs/([0-9a-f]{32})/(reconcile|retry)", request_path)
+        if recovery_match:
+            try:
+                job_id, action = recovery_match.groups()
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 64 * 1024:
+                    raise ValueError("恢复请求数据为空或过大")
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                state = read_state(job_id)
+                client_request_id = str(payload.get("client_request_id", ""))
+                if not secrets.compare_digest(client_request_id, str(state.get("client_request_id", ""))):
+                    raise PermissionError("无权恢复该生成任务")
+                if action == "reconcile":
+                    upstream_id = str(payload.get("upstream_task_id", "")).strip()[:200]
+                    if not upstream_id.startswith("task_"):
+                        raise ValueError("请输入 ModelsNexus 任务详情中的 task_id")
+                    result = reconcile_unknown_video_task(job_id, upstream_id)
+                else:
+                    result = retry_confirmed_failed_job(job_id)
+                result.pop("files", None)
+                result.pop("signed_assets", None)
+                result.pop("media_assets", None)
+                result.pop("client_request_id", None)
+                self.send_json(HTTPStatus.OK, result)
+            except PermissionError as exc:
+                self.send_json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+            except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            except Exception as exc:  # noqa: BLE001
+                self.send_json(HTTPStatus.BAD_GATEWAY, {"error": f"上游任务核验失败：{exc}"})
+            return
         if request_path == "/projects":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -2768,6 +2863,7 @@ class Handler(BaseHTTPRequestHandler):
                     "requirements": str(form.getfirst("requirements", ""))[:20000],
                     "generation_plan": generation_plan,
                     "client_request_id": client_request_id,
+                    "generation_attempt": 1,
                     "submission_state": "not_started",
                     "files": files,
                 }
