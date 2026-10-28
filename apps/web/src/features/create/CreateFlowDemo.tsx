@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CoverThumb } from '../workbench/CoverThumb';
 import { VelornProductionWorkbench } from './VelornProductionWorkbench';
+import { deleteProjectAssets, loadProjectAssets, saveProjectAssets } from './projectAssetStore';
 import '../../marketing.css';
 import './create.css';
 
@@ -273,6 +274,7 @@ function createClientRequestId() {
 export function CreateFlowDemo() {
   const submissionLockRef = useRef(false);
   const submissionRequestIdRef = useRef<string | null>(null);
+  const assetLoadSequenceRef = useRef(0);
   // 公网首页先展示真实项目库；只有新建或打开项目后才进入制作工作流。
   const [pageView, setPageView] = useState<'projects' | 'workflow'>('projects');
   const [projectSearch, setProjectSearch] = useState('');
@@ -288,6 +290,7 @@ export function CreateFlowDemo() {
   const [resolution, setResolution] = useState('720p');
   const [director, setDirector] = useState('王家卫');
   const [assets, setAssets] = useState<AssetState>({ song: null, lyrics: null, portrait: [], reference: null, voice: null });
+  const [assetHydrating, setAssetHydrating] = useState(false);
   const [running, setRunning] = useState(false);
   const [runProgress, setRunProgress] = useState(0);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -451,9 +454,20 @@ export function CreateFlowDemo() {
     }
   };
 
+  const persistProjectAssetState = (nextAssets: AssetState, successMessage: string) => {
+    if (!activeProjectId) return;
+    void saveProjectAssets(activeProjectId, nextAssets).then(() => {
+      setNotice(successMessage);
+    }).catch(error => {
+      setNotice(`项目素材本地保存失败：${error instanceof Error ? error.message : '浏览器存储不可用'}`);
+    });
+  };
+
   const selectFile = (key: Exclude<AssetKey, 'portrait'>, file: File | undefined) => {
     if (!file) return;
-    setAssets(current => ({ ...current, [key]: file }));
+    const nextAssets = { ...assets, [key]: file };
+    setAssets(nextAssets);
+    persistProjectAssetState(nextAssets, `${file.name} 已保存到当前项目，刷新页面后仍会保留。`);
     setAgentAnalysis(null);
     setAgentAnalysisComplete(false);
     setAgentAnalysisError('');
@@ -463,10 +477,10 @@ export function CreateFlowDemo() {
   const selectPortraits = (files: FileList | null) => {
     const selectedFiles = files ? Array.from(files) : [];
     if (!selectedFiles.length) return;
-    setAssets(current => {
-      const merged = [...current.portrait, ...selectedFiles].filter((file, index, all) => all.findIndex(candidate => candidate.name === file.name && candidate.size === file.size) === index).slice(0, 8);
-      return { ...current, portrait: merged };
-    });
+    const merged = [...assets.portrait, ...selectedFiles].filter((file, index, all) => all.findIndex(candidate => candidate.name === file.name && candidate.size === file.size) === index).slice(0, 8);
+    const nextAssets = { ...assets, portrait: merged };
+    setAssets(nextAssets);
+    persistProjectAssetState(nextAssets, `${merged.length} 张人物参考图已保存到当前项目。`);
     setAgentAnalysis(null);
     setAgentAnalysisComplete(false);
     setAgentAnalysisError('');
@@ -480,7 +494,9 @@ export function CreateFlowDemo() {
   }, [portraitPreviews]);
 
   const removePortrait = (index: number) => {
-    setAssets(current => ({ ...current, portrait: current.portrait.filter((_, itemIndex) => itemIndex !== index) }));
+    const nextAssets = { ...assets, portrait: assets.portrait.filter((_, itemIndex) => itemIndex !== index) };
+    setAssets(nextAssets);
+    persistProjectAssetState(nextAssets, '人物参考图已从当前项目删除。');
     setAgentAnalysis(null);
     setAgentAnalysisComplete(false);
     setNotice('已删除该人物参考图，其余参考图保持同级。');
@@ -504,6 +520,7 @@ export function CreateFlowDemo() {
   };
 
   const loadProject = (project: ProjectRecord) => {
+    const loadSequence = ++assetLoadSequenceRef.current;
     setActiveProjectId(project.id);
     setProjectName(project.name);
     setRatio(project.ratio);
@@ -519,14 +536,37 @@ export function CreateFlowDemo() {
     setAgentAnalysisError('');
     setAgentAnalyzing(false);
     setAssets({ song: null, lyrics: null, portrait: [], reference: null, voice: null });
+    setAssetHydrating(true);
+    void loadProjectAssets(project.id).then(records => {
+      if (assetLoadSequenceRef.current !== loadSequence) return;
+      const restored: AssetState = { song: null, lyrics: null, portrait: [], reference: null, voice: null };
+      records.forEach(record => {
+        const file = new File([record.blob], record.name, { type: record.type, lastModified: record.lastModified });
+        if (record.key === 'portrait') restored.portrait.push(file);
+        else restored[record.key] = file;
+      });
+      setAssets(restored);
+      const count = Number(Boolean(restored.song)) + Number(Boolean(restored.lyrics)) + restored.portrait.length + Number(Boolean(restored.reference)) + Number(Boolean(restored.voice));
+      setNotice(count
+        ? `已恢复项目「${project.name}」的 ${count} 项素材，可继续进行 Agent 分析或生成。`
+        : `已打开项目「${project.name}」，当前浏览器没有该项目的素材缓存。`);
+    }).catch(error => {
+      if (assetLoadSequenceRef.current === loadSequence) {
+        setNotice(`项目已打开，但素材恢复失败：${error instanceof Error ? error.message : '浏览器存储不可用'}`);
+      }
+    }).finally(() => {
+      if (assetLoadSequenceRef.current === loadSequence) setAssetHydrating(false);
+    });
     setJob(project.job_id
       ? { id: project.job_id, status: project.result_url ? 'completed' : 'queued', progress: project.result_url ? 100 : Math.max(5, project.progress || 5), result_url: project.result_url }
       : null);
     setPageView('workflow');
-    setNotice(`已从服务器打开项目「${project.name}」。项目配置与 Agent 分镜已恢复。`);
+    setNotice(`已从服务器打开项目「${project.name}」，正在恢复项目素材…`);
   };
 
   const createProject = async () => {
+    assetLoadSequenceRef.current += 1;
+    setAssetHydrating(false);
     const draft = {
       name: '未命名 MV', ratio: '16:9', model: 'Seedance 2.5 · 海外版' as ModelName,
       resolution: '720p', director: '王家卫', requirements: '描述你想要的故事、画面风格、人物表演与镜头节奏。',
@@ -573,6 +613,7 @@ export function CreateFlowDemo() {
       const response = await fetch(`/yingliu-demo-api/projects/${project.id}`, { method: 'DELETE' });
       const payload = await response.json() as { deleted?: boolean; error?: string };
       if (!response.ok || !payload.deleted) throw new Error(payload.error || '删除项目失败');
+      await deleteProjectAssets(project.id).catch(() => undefined);
       setProjects(current => current.filter(item => item.id !== project.id));
       if (activeProjectId === project.id) setActiveProjectId(null);
       setNotice(`项目「${project.name}」已从服务器删除。`);
@@ -900,7 +941,7 @@ export function CreateFlowDemo() {
                 <ul className="summary-list">
                   {assetConfig.map(item => <li key={item.key}><span>{item.title}</span><b className={assetReady(item.key) ? 'status-ready' : ''}>{assetReady(item.key) ? item.key === 'portrait' ? `${assets.portrait.length} 张` : '已选择' : item.required ? '必填' : '可选'}</b></li>)}
                 </ul>
-                <div className="mv-privacy-note"><b>隐私说明</b><p>点击生成后，素材会上传到本服务器完成渲染，仅用于本次任务，并在 24 小时后自动清理。公开 Demo 最长生成前 60 秒。</p></div>
+                <div className="mv-privacy-note"><b>项目素材保存</b><p>{assetHydrating ? '正在从当前浏览器恢复项目文件…' : '文件保存在当前浏览器的项目存储中，刷新或关闭页面后仍可恢复；点击分析或生成时才上传服务器处理。'}</p></div>
               </div>
             </aside>
           </div>
@@ -988,7 +1029,7 @@ export function CreateFlowDemo() {
         {notice && <div className="shot-notice mv-notice" role="status">{notice}</div>}
         <div className="create-actions">
           <button className="button button-secondary" type="button" onClick={() => setActiveStep(step => Math.max(0, step - 1))} disabled={activeStep === 0}>上一步</button>
-          {activeStep < stepCopy.length - 1 && <button className="button button-primary" type="button" onClick={() => void nextStep()} disabled={agentAnalyzing || (activeStep === 1 && (!agentAnalysisComplete || !corpusReady || !referenceBlueprintReady))}>{agentAnalyzing ? 'DeepSeek Agent 真实分析中…' : `下一步：${stepCopy[activeStep + 1][1]}`} {!agentAnalyzing && <span>→</span>}</button>}
+          {activeStep < stepCopy.length - 1 && <button className="button button-primary" type="button" onClick={() => void nextStep()} disabled={assetHydrating || agentAnalyzing || (activeStep === 1 && (!agentAnalysisComplete || !corpusReady || !referenceBlueprintReady))}>{assetHydrating ? '正在恢复项目素材…' : agentAnalyzing ? 'DeepSeek Agent 真实分析中…' : `下一步：${stepCopy[activeStep + 1][1]}`} {!assetHydrating && !agentAnalyzing && <span>→</span>}</button>}
           <p className="create-actions-note">可运行 Demo · 真实上传并生成 MP4，不调用付费视频模型，最长处理前 60 秒。</p>
         </div>
       </VelornProductionWorkbench>
