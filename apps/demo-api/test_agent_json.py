@@ -47,10 +47,30 @@ class AgentJsonParserTests(unittest.TestCase):
         segments = server.reference_scene_segments(12.0, [2.0, 5.5, 9.0])
         self.assertEqual([item["source_time"] for item in segments], [
             "00:00.000–00:02.000",
-            "00:02.000–00:05.500",
-            "00:05.500–00:09.000",
+            "00:02.000–00:03.750",
+            "00:03.750–00:05.500",
+            "00:05.500–00:07.250",
+            "00:07.250–00:09.000",
             "00:09.000–00:12.000",
         ])
+        self.assertEqual(segments[1]["boundary_type"], "hard_or_transition_cut")
+        self.assertEqual(segments[2]["boundary_type"], "continuous_same_shot")
+
+    def test_parses_and_merges_precise_scene_events(self) -> None:
+        stderr = """frame:1 pts:100 pts_time:1.000\nlavfi.scene_score=0.120000
+frame:2 pts:110 pts_time:1.100\nlavfi.scene_score=0.150000
+frame:3 pts:120 pts_time:1.200\nlavfi.scene_score=0.110000
+frame:8 pts:500 pts_time:5.000\nlavfi.scene_score=0.420000"""
+        events = server.parse_reference_scene_events(stderr)
+        self.assertEqual(events, [(1.0, 0.12), (1.1, 0.15), (1.2, 0.11), (5.0, 0.42)])
+        self.assertEqual(server.merge_reference_cut_candidates(events, 8.0), [1.1, 5.0])
+
+    def test_long_take_is_split_into_dense_same_shot_windows(self) -> None:
+        segments = server.reference_scene_segments(15.0, [])
+        self.assertEqual(len(segments), 5)
+        self.assertTrue(all(item["physical_shot_index"] == 1 for item in segments))
+        self.assertTrue(all(item["boundary_type"] == "continuous_same_shot" for item in segments))
+        self.assertEqual(segments[-1]["end_seconds"], 15.0)
 
     def test_reference_segments_merge_without_gaps(self) -> None:
         cuts = [float(index) for index in range(1, 20)]

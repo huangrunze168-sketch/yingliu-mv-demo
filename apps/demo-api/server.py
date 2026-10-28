@@ -1369,11 +1369,12 @@ def reference_contact_sheet_data_url(
 ) -> str:
     """为一个镜头区间生成按时间排序的连续关键帧图，供视觉模型判断动作与运镜。"""
     duration = max(0.2, end - start)
+    frame_width = 240 if frame_count > 6 else 360
     subprocess.run(
         [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(path),
-            "-vf", f"scale=360:-2,fps={frame_count}/{duration:.6f},tile={frame_count}x1",
+            "-vf", f"scale={frame_width}:-2,fps={frame_count}/{duration:.6f},tile={frame_count}x1",
             "-frames:v", "1", "-q:v", "4", str(output),
         ],
         check=True,
@@ -1384,23 +1385,88 @@ def reference_contact_sheet_data_url(
     return f"data:image/jpeg;base64,{encoded}"
 
 
+def parse_reference_scene_events(stderr: str) -> list[tuple[float, float]]:
+    """解析 FFmpeg metadata 输出的逐帧场景变化分数。"""
+    events: list[tuple[float, float]] = []
+    current_time: float | None = None
+    for line in stderr.splitlines():
+        time_match = re.search(r"pts_time:([0-9.]+)", line)
+        if time_match:
+            current_time = float(time_match.group(1))
+        score_match = re.search(r"lavfi\.scene_score=([0-9.eE+-]+)", line)
+        if score_match and current_time is not None:
+            events.append((current_time, float(score_match.group(1))))
+            current_time = None
+    return events
+
+
+def merge_reference_cut_candidates(
+    events: list[tuple[float, float]],
+    duration: float,
+    black_points: list[float] | None = None,
+) -> list[float]:
+    """把硬切、叠化/渐隐连续响应和黑场合并为精确镜头边界。"""
+    clusters: list[list[tuple[float, float]]] = []
+    for event in sorted(events):
+        if not clusters or event[0] - clusters[-1][-1][0] > 0.45:
+            clusters.append([event])
+        else:
+            clusters[-1].append(event)
+
+    candidates: list[tuple[float, float]] = []
+    for cluster in clusters:
+        strongest = max(cluster, key=lambda item: item[1])
+        # 硬切通常有单帧高峰；叠化会在相邻多帧形成一串较低的响应。
+        if strongest[1] >= 0.18 or (len(cluster) >= 3 and strongest[1] >= 0.10):
+            candidates.append(strongest)
+    candidates.extend((value, 1.0) for value in (black_points or []))
+    candidates.sort()
+
+    # 小于 0.32 秒的抖动响应不单独成镜；相邻候选保留分数更高者。
+    stable: list[tuple[float, float]] = []
+    for value, score in candidates:
+        if not 0.20 < value < duration - 0.20:
+            continue
+        if stable and value - stable[-1][0] < 0.32:
+            if score > stable[-1][1]:
+                stable[-1] = (value, score)
+            continue
+        stable.append((value, score))
+    return [round(value, 3) for value, _ in stable[:80]]
+
+
 def detect_reference_scene_cuts(path: pathlib.Path, duration: float) -> list[float]:
-    """用 FFmpeg 场景差异检测取得候选切点；失败时退回均匀采样。"""
+    """用 FFmpeg 逐帧差异、渐变响应和黑场联合检测镜头边界。"""
     try:
         completed = subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "info", "-i", str(path),
-                "-vf", "select='gt(scene,0.28)',showinfo", "-an", "-f", "null", "-",
+                "-vf", "select='gte(scene,0.08)',metadata=print", "-an", "-f", "null", "-",
             ],
             check=False,
             capture_output=True,
             text=True,
             timeout=120,
         )
-        cuts = [float(value) for value in re.findall(r"pts_time:([0-9.]+)", completed.stderr)]
+        events = parse_reference_scene_events(completed.stderr)
+        black_completed = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "info", "-i", str(path),
+                "-vf", "blackdetect=d=0.06:pix_th=0.10", "-an", "-f", "null", "-",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        black_points = [
+            (float(start) + float(end)) / 2
+            for start, end in re.findall(r"black_start:([0-9.]+).*?black_end:([0-9.]+)", black_completed.stderr)
+        ]
+        cuts = merge_reference_cut_candidates(events, duration, black_points)
     except (subprocess.SubprocessError, OSError, ValueError):
         cuts = []
-    return sorted({round(value, 3) for value in cuts if 0.25 < value < duration - 0.25})[:40]
+    return sorted({round(value, 3) for value in cuts if 0.20 < value < duration - 0.20})[:80]
 
 
 def reference_sample_times(duration: float, cuts: list[float], limit: int = 10) -> list[float]:
@@ -1415,10 +1481,23 @@ def reference_sample_times(duration: float, cuts: list[float], limit: int = 10) 
     return [unique[index] for index in indexes]
 
 
-def reference_scene_segments(duration: float, cuts: list[float], limit: int = 12) -> list[dict[str, Any]]:
-    """把切点转换为覆盖完整视频的镜头区间；切点过多时按时间连续合并。"""
+def reference_scene_segments(
+    duration: float,
+    cuts: list[float],
+    limit: int = 24,
+    max_window_seconds: float = 3.0,
+) -> list[dict[str, Any]]:
+    """把物理切点转为连续分析窗；长镜头继续细分，但明确标记为同镜延续。"""
     boundaries = [0.0, *sorted(value for value in cuts if 0 < value < duration), duration]
-    raw = [(boundaries[index], boundaries[index + 1]) for index in range(len(boundaries) - 1)]
+    raw: list[tuple[float, float, int, str]] = []
+    for shot_index, (shot_start, shot_end) in enumerate(zip(boundaries, boundaries[1:]), start=1):
+        shot_duration = shot_end - shot_start
+        window_count = max(1, math.ceil(shot_duration / max_window_seconds))
+        for window_index in range(window_count):
+            start = shot_start + shot_duration * window_index / window_count
+            end = shot_start + shot_duration * (window_index + 1) / window_count
+            boundary_type = "hard_or_transition_cut" if window_index == 0 and shot_index > 1 else "continuous_same_shot"
+            raw.append((start, end, shot_index, boundary_type))
     if len(raw) <= limit:
         groups = [[item] for item in raw]
     else:
@@ -1433,6 +1512,8 @@ def reference_scene_segments(duration: float, cuts: list[float], limit: int = 12
             "start_seconds": round(group[0][0], 3),
             "end_seconds": round(group[-1][1], 3),
             "source_time": f"{format_timestamp(group[0][0])}–{format_timestamp(group[-1][1])}",
+            "physical_shot_index": group[0][2],
+            "boundary_type": group[0][3] if len({item[2] for item in group}) == 1 else "merged_multiple_shots",
             "contained_cut_times": [
                 format_timestamp(value)
                 for value in cuts
@@ -1929,7 +2010,7 @@ def analyze_reference_video_isolated(
             digest.update(chunk)
     cache_dir = DSH_HOME / "reference-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_identity = f"reference-blueprint-v2:{DEEPSEEK_MODEL}:{digest.hexdigest()}"
+    cache_identity = f"reference-blueprint-v3-ffmpeg-dense:{DEEPSEEK_MODEL}:{digest.hexdigest()}"
     cache_key = hashlib.sha256(cache_identity.encode("utf-8")).hexdigest()
     cache_path = cache_dir / f"{cache_key}.json"
     if cache_path.is_file():
@@ -1943,15 +2024,35 @@ def analyze_reference_video_isolated(
             pass
 
     duration = float(reference_context.get("duration_seconds") or 0)
-    max_frames = 12 if duration <= 20 else 24
-    task = f"""你是对标视频拉片分析 Agent。本会话只能分析下面这个视频，禁止读取任何人物参考图、项目要求、导演库或电影语料：
-视频路径：{reference_path.resolve()}
+    expected_segments = reference_context.get("segments") if isinstance(reference_context.get("segments"), list) else []
+    if not expected_segments:
+        raise RuntimeError("FFmpeg 未生成对标视频连续时间轴")
+    evidence: list[dict[str, Any]] = []
+    for segment in expected_segments:
+        sheet_path = directory / f"reference-dense-{int(segment['index']):02d}.jpg"
+        reference_contact_sheet_data_url(
+            reference_path,
+            sheet_path,
+            float(segment["start_seconds"]),
+            float(segment["end_seconds"]),
+            frame_count=12,
+        )
+        evidence.append({
+            "source_time": segment["source_time"],
+            "physical_shot_index": segment.get("physical_shot_index"),
+            "boundary_type": segment.get("boundary_type"),
+            "contained_cut_times": segment.get("contained_cut_times", []),
+            "contact_sheet": str(sheet_path.resolve()),
+            "frame_order": "从左到右共 12 帧，等距覆盖该时间窗",
+        })
+    task = f"""你是对标视频精确拉片 Agent。本会话只能分析 FFmpeg 已经按逐帧差异锁定的时间轴证据，禁止读取任何人物参考图、项目要求、导演库或电影语料：
 视频时长：{duration:.3f} 秒
-技术切点：{json.dumps(reference_context.get('scene_cut_times', []), ensure_ascii=False)}
+FFmpeg 物理切点：{json.dumps(reference_context.get('scene_cut_times', []), ensure_ascii=False)}
+FFmpeg 锁定的连续分析窗与密集帧证据：{json.dumps(evidence, ensure_ascii=False)}
 
-必须且只能调用一次 video_analyze，显式传 maxFrames={max_frames}，让采样覆盖完整视频。不要调用 read_image，不要猜测视频外的场景。
+并行调用 read_image 读取上面全部 contact_sheet。每张图从左到右是该时间窗内等距排列的 12 帧，不得跳读、调换顺序或把不同时间窗混在一起。禁止调用 video_analyze、video_probe、video_ask，不要重新抽样或重新划分时间轴。
 先区分“视频真实可见的背景、人物、服装、道具、动作”和“后续项目要替换的内容”；本次只输出前者。
-按照真实动作变化、景别变化、运镜和切镜动态划分 3–10 个连续时间段，必须从 00:00.000 连续覆盖到 {format_timestamp(duration)}，不能留空档。
+必须严格按照 FFmpeg 给出的分析窗逐项输出：数量必须正好为 {len(expected_segments)}，source_time 必须逐字复制，不得合并、拆分、改写或遗漏。boundary_type=continuous_same_shot 表示同一物理镜头内的动作延续，transition 必须明确写“同镜连续，无切镜”以及画面如何延续；只有 hard_or_transition_cut 才能描述切镜或转场。
 每一段都要写出画面中实际看见的内容，不能使用人物参考图中的外貌、服装或背景，也不能加入导演风格。
 
 最终只输出一个合法 JSON 对象，不要 Markdown 或解释：
@@ -2003,9 +2104,16 @@ def analyze_reference_video_isolated(
         for item in segments
     ):
         raise RuntimeError("对标视频隔离分析未返回完整逐段画面骨架")
+    if len(segments) != len(expected_segments):
+        raise RuntimeError(f"对标视频隔离分析返回 {len(segments)} 段，但 FFmpeg 时间轴要求 {len(expected_segments)} 段")
     normalized_segments = []
-    for item in segments:
-        normalized_segments.append({key: agent_display_text(item.get(key)) for key in required})
+    for item, expected in zip(segments, expected_segments):
+        normalized = {key: agent_display_text(item.get(key)) for key in required}
+        # source_time 是 FFmpeg 的确定性事实，模型无权改写。
+        normalized["source_time"] = str(expected["source_time"])
+        normalized["physical_shot_index"] = int(expected.get("physical_shot_index") or 1)
+        normalized["boundary_type"] = str(expected.get("boundary_type") or "continuous_same_shot")
+        normalized_segments.append(normalized)
     analysis["timeline_segments"] = normalized_segments
     for key in high_level_fields:
         analysis[key] = agent_display_text(analysis.get(key))
@@ -2378,8 +2486,10 @@ def analyze_form(form: cgi.FieldStorage) -> dict[str, Any]:
                     "duration_seconds": round(reference_duration, 3),
                     "scene_cut_times": [format_timestamp(value) for value in scene_cuts],
                     "estimated_shots": len(scene_cuts) + 1,
+                    "analysis_windows": len(segments),
+                    "detection_method": "FFmpeg 逐帧 scene_score + 渐变响应聚类 + blackdetect；长镜头按不超过 3 秒细分为同镜连续分析窗",
                     "segments": segments,
-                    "instruction": "每张图是一个时间段内按从左到右排列的 4 帧连续关键帧。必须逐段比较主体位移、肢体动作、构图变化、景别变化和镜头运动，并一一输出对应 reference_shots。把对标视频作为权威画面骨架，只替换用户人物、服装、场景语义、文字和品牌元素；导演库与电影语料仅负责修辞增强。",
+                    "instruction": "物理切点和连续分析窗由 FFmpeg 锁定。每个分析窗使用从左到右 12 帧密集证据判断主体位移、肢体动作、构图、景别与运镜；不得让 Agent 重新分段。把对标视频作为权威画面骨架，只替换用户人物、服装、场景语义、文字和品牌元素；导演库与电影语料仅负责修辞增强。",
                 }
                 if needs_direct_fallback_inputs:
                     for segment in segments:
