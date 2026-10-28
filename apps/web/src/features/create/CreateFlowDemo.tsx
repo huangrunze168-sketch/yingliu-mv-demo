@@ -653,7 +653,16 @@ export function CreateFlowDemo() {
     if (assets.voice) body.append('voice', assets.voice);
     try {
       const response = await fetch('/yingliu-demo-api/analyze', { method: 'POST', body });
-      const payload = await response.json() as AgentAnalysis & { error?: string };
+      const responseText = await response.text();
+      let payload: AgentAnalysis & { error?: string };
+      try {
+        payload = JSON.parse(responseText || '{}') as AgentAnalysis & { error?: string };
+      } catch {
+        const proxyError = response.status >= 500
+          ? `Agent 服务连接被代理中断（HTTP ${response.status}），本次没有产生有效分析结果，请稍后重试。`
+          : `Agent 服务返回了非 JSON 响应（HTTP ${response.status}）。`;
+        throw new Error(proxyError);
+      }
       if (!response.ok) throw new Error(payload.error || 'Agent 分析失败');
       if (!Array.isArray(payload.analysis_cards) || !Array.isArray(payload.shots) || payload.shots.length === 0) {
         throw new Error('Agent 返回的分镜结构不完整，请重试');
