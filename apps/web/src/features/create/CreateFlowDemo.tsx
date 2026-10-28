@@ -126,6 +126,57 @@ function generationApiModel(model: ModelName, resolution: string) {
   return resolution === '2k' ? 'minimax-h3-2k' : 'minimax-h3-768p';
 }
 
+function agentDisplayText(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return value.map(agentDisplayText).filter(Boolean).join('；');
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    if (record.observation) {
+      const prefix = agentDisplayText(record.type || record.file);
+      const observation = agentDisplayText(record.observation);
+      return prefix ? `${prefix}：${observation}` : observation;
+    }
+    const labels: Record<string, string> = { composition: '构图', camera: '摄影', lighting_color: '光色', blocking: '调度', rhythm: '节奏', avoid: '避免' };
+    return Object.entries(record).map(([key, item]) => {
+      const text = agentDisplayText(item);
+      return text ? `${labels[key] || key}：${text}` : '';
+    }).filter(Boolean).join('；');
+  }
+  return String(value);
+}
+
+function normalizeAgentPayload(payload: AgentAnalysis): AgentAnalysis {
+  return {
+    ...payload,
+    project_summary: agentDisplayText(payload.project_summary),
+    creative_brief: agentDisplayText(payload.creative_brief),
+    director_application: agentDisplayText(payload.director_application),
+    material_observations: Array.isArray(payload.material_observations)
+      ? payload.material_observations.map(agentDisplayText).filter(Boolean)
+      : [],
+    analysis_cards: Array.isArray(payload.analysis_cards) ? payload.analysis_cards.map(card => ({
+      title: agentDisplayText(card?.title),
+      value: agentDisplayText(card?.value),
+      copy: agentDisplayText(card?.copy),
+    })) : [],
+    timeline: Array.isArray(payload.timeline) ? payload.timeline.map(item => ({
+      time: agentDisplayText(item?.time),
+      label: agentDisplayText(item?.label),
+    })) : [],
+    shots: Array.isArray(payload.shots) ? payload.shots.map(shot => ({
+      ...shot,
+      id: agentDisplayText(shot?.id),
+      time: agentDisplayText(shot?.time),
+      title: agentDisplayText(shot?.title),
+      lyrics_window: agentDisplayText(shot?.lyrics_window),
+      prompt: agentDisplayText(shot?.prompt),
+      negative_prompt: agentDisplayText(shot?.negative_prompt),
+      corpus_refs: Array.isArray(shot?.corpus_refs) ? shot.corpus_refs.map(agentDisplayText) : [],
+    })) : [],
+  };
+}
+
 const assetConfig: Array<{ key: AssetKey; title: string; copy: string; accept: string; required: boolean; tag: string }> = [
   { key: 'song', title: '原始音频', copy: '可选；上传后作为整支 MV 的时间基准', accept: 'audio/*', required: false, tag: 'MP3 · WAV · FLAC' },
   { key: 'lyrics', title: '歌词文件', copy: '可选；上传后用于逐句对齐、口型与切点', accept: '.txt,.lrc,text/plain', required: false, tag: 'TXT · LRC' },
@@ -500,9 +551,31 @@ export function CreateFlowDemo() {
       if (!Array.isArray(payload.analysis_cards) || !Array.isArray(payload.shots) || payload.shots.length === 0) {
         throw new Error('Agent 返回的分镜结构不完整，请重试');
       }
-      setAgentAnalysis(payload);
+      const normalizedPayload = normalizeAgentPayload(payload);
+      if (activeProjectId) {
+        setProjectSync('saving');
+        try {
+          const assetCount = Number(Boolean(assets.song)) + Number(Boolean(assets.lyrics)) + assets.portrait.length + Number(Boolean(assets.reference)) + Number(Boolean(assets.voice));
+          const saveResponse = await fetch(`/yingliu-demo-api/projects/${activeProjectId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: projectName || '未命名 MV', ratio, model, resolution, director, requirements,
+              status: '分镜提示词已生成', progress: 66, shots: normalizedPayload.shots.length,
+              assets: assetCount, active_step: 1, agent_analysis: normalizedPayload,
+            }),
+          });
+          const saved = await saveResponse.json() as ProjectRecord & { error?: string };
+          if (!saveResponse.ok) throw new Error(saved.error || '分析结果保存失败');
+          setProjects(current => [saved, ...current.filter(item => item.id !== saved.id)]);
+          setProjectSync('saved');
+        } catch {
+          setProjectSync('error');
+        }
+      }
+      setAgentAnalysis(normalizedPayload);
       setAgentAnalysisComplete(true);
-      setNotice(`DeepSeek Agent 真实分析完成，已生成 ${payload.shots.length} 份分镜全能提示词。`);
+      setNotice(`DeepSeek Agent 真实分析完成，已生成 ${normalizedPayload.shots.length} 份分镜全能提示词。`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Agent 分析失败';
       setAgentAnalysisError(message);

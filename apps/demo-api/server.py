@@ -1579,6 +1579,76 @@ def reference_ranges_cover_video(reference_shots: list[dict[str, Any]], duration
     return first_start <= 0.5 and merged_end >= duration - 0.5 and covered >= duration * 0.9
 
 
+def agent_display_text(value: Any) -> str:
+    """把模型偶发返回的结构化文案转换为前端可安全渲染的文本。"""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, (str, int, float)):
+        return str(value).strip()
+    if isinstance(value, list):
+        return "；".join(filter(None, (agent_display_text(item) for item in value)))
+    if isinstance(value, dict):
+        observation = value.get("observation")
+        if observation not in (None, ""):
+            prefix = agent_display_text(value.get("type") or value.get("file"))
+            body = agent_display_text(observation)
+            return f"{prefix}：{body}" if prefix else body
+        labels = {
+            "composition": "构图",
+            "camera": "摄影",
+            "lighting_color": "光色",
+            "blocking": "调度",
+            "rhythm": "节奏",
+            "avoid": "避免",
+        }
+        parts = []
+        for key, item in value.items():
+            text = agent_display_text(item)
+            if text:
+                parts.append(f"{labels.get(str(key), str(key))}：{text}")
+        return "；".join(parts)
+    return str(value).strip()
+
+
+def normalize_agent_display_fields(result: dict[str, Any]) -> None:
+    """保证所有会作为 React 文本节点渲染的字段都是标量字符串。"""
+    for key in ("project_summary", "creative_brief", "director_application"):
+        result[key] = agent_display_text(result.get(key))
+    observations = result.get("material_observations")
+    if isinstance(observations, list):
+        result["material_observations"] = [text for text in (agent_display_text(item) for item in observations) if text]
+    else:
+        result["material_observations"] = [agent_display_text(observations)] if observations else []
+    cards = result.get("analysis_cards")
+    if isinstance(cards, list):
+        for card in cards:
+            if isinstance(card, dict):
+                for key in ("title", "value", "copy"):
+                    card[key] = agent_display_text(card.get(key))
+    timeline = result.get("timeline")
+    if isinstance(timeline, list):
+        for item in timeline:
+            if isinstance(item, dict):
+                item["time"] = agent_display_text(item.get("time"))
+                item["label"] = agent_display_text(item.get("label"))
+    shots = result.get("shots")
+    if isinstance(shots, list):
+        for shot in shots:
+            if not isinstance(shot, dict):
+                continue
+            for key in ("id", "time", "title", "lyrics_window", "prompt", "negative_prompt"):
+                shot[key] = agent_display_text(shot.get(key))
+            for nested_key in ("lyrics_sync", "reference_match", "director_method"):
+                nested = shot.get(nested_key)
+                if isinstance(nested, dict):
+                    for key, value in list(nested.items()):
+                        nested[key] = agent_display_text(value)
+            refs = shot.get("corpus_refs")
+            shot["corpus_refs"] = [agent_display_text(item) for item in refs] if isinstance(refs, list) else []
+
+
 def finalize_agent_result(
     result: dict[str, Any],
     context: dict[str, Any],
@@ -1598,6 +1668,7 @@ def finalize_agent_result(
     shots = result.get("shots")
     if not isinstance(cards, list) or len(cards) != 4 or not isinstance(shots, list) or len(shots) < 1:
         raise RuntimeError(f"{provider} 返回结构不完整，请重试")
+    normalize_agent_display_fields(result)
     normalize_reference_breakdown(result, context)
     required_method_fields = {"composition", "camera", "lighting_color", "blocking", "rhythm"}
     corpus_ids = {str(item.get("id")) for item in context["corpus_retrieval"]["items"]}

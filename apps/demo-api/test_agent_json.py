@@ -102,6 +102,29 @@ class AgentJsonParserTests(unittest.TestCase):
         self.assertTrue(server.reference_ranges_cover_video(shots, 15.033))
         self.assertFalse(server.reference_ranges_cover_video(shots[:-1], 15.033))
 
+    def test_normalizes_structured_copy_for_react_rendering(self) -> None:
+        result = {
+            "project_summary": "测试",
+            "creative_brief": "简报",
+            "director_application": {"composition": "门框切割", "camera": "50mm 平视"},
+            "material_observations": [
+                {"type": "portrait", "file": "portrait.png", "observation": "白发红衣老人"},
+            ],
+            "analysis_cards": [{"title": "人物", "value": {"count": 1}, "copy": "已读取"}],
+            "timeline": [{"time": "00:00", "label": {"section": "前奏"}}],
+            "shots": [{
+                "id": "S01", "time": "00:00–00:03", "title": "开场",
+                "lyrics_window": {"start": "00:00", "end": "00:03", "text": "纯音乐"},
+                "prompt": "提示词", "corpus_refs": ["film-1"],
+            }],
+        }
+        server.normalize_agent_display_fields(result)
+        self.assertEqual(result["director_application"], "构图：门框切割；摄影：50mm 平视")
+        self.assertEqual(result["material_observations"], ["portrait：白发红衣老人"])
+        self.assertEqual(result["analysis_cards"][0]["value"], "count：1")
+        self.assertEqual(result["timeline"][0]["label"], "section：前奏")
+        self.assertIn("start：00:00", result["shots"][0]["lyrics_window"])
+
     def test_dsh_headless_receives_workspace_and_video_tool_instructions(self) -> None:
         context = {
             "title": "测试",
