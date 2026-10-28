@@ -1673,6 +1673,88 @@ def normalize_agent_display_fields(result: dict[str, Any]) -> None:
             shot["corpus_refs"] = [agent_display_text(item) for item in refs] if isinstance(refs, list) else []
 
 
+def lock_result_to_isolated_reference(result: dict[str, Any], context: dict[str, Any]) -> None:
+    """用隔离拉片结果覆盖最终 Agent 可能受到人物图污染的对标字段。"""
+    reference_video = context.get("reference_video")
+    if not isinstance(reference_video, dict):
+        return
+    analysis = reference_video.get("isolated_analysis")
+    if not isinstance(analysis, dict):
+        return
+    segments = analysis.get("timeline_segments")
+    if not isinstance(segments, list) or not segments:
+        return
+
+    segment_by_time = {
+        agent_display_text(item.get("source_time")): item
+        for item in segments
+        if isinstance(item, dict) and agent_display_text(item.get("source_time"))
+    }
+    breakdown = result.get("reference_breakdown")
+    if not isinstance(breakdown, dict):
+        breakdown = {}
+        result["reference_breakdown"] = breakdown
+    existing_reference_shots = breakdown.get("reference_shots")
+    existing_mapping = {
+        agent_display_text(item.get("source_time")): agent_display_text(item.get("target_mapping"))
+        for item in (existing_reference_shots if isinstance(existing_reference_shots, list) else [])
+        if isinstance(item, dict)
+    }
+    enhancements = breakdown.get("rhetorical_enhancement")
+    if enhancements is None:
+        enhancements = []
+    elif not isinstance(enhancements, list):
+        enhancements = [agent_display_text(enhancements)]
+
+    breakdown.update({
+        "summary": agent_display_text(analysis.get("summary")),
+        "shot_scale_pattern": agent_display_text(analysis.get("shot_scale_pattern")),
+        "composition": "；".join(
+            agent_display_text(item.get("subject_layout")) for item in segments if isinstance(item, dict)
+        ),
+        "lighting_color": agent_display_text(analysis.get("lighting_color")),
+        "blocking_performance": "；".join(
+            agent_display_text(item.get("action_timing")) for item in segments if isinstance(item, dict)
+        ),
+        "editing_rhythm": agent_display_text(analysis.get("editing_rhythm")),
+        "rhetorical_enhancement": enhancements,
+        "reference_shots": [
+            {
+                "source_time": agent_display_text(item.get("source_time")),
+                "visual_blueprint": agent_display_text(item.get("visual_blueprint")),
+                "subject_layout": agent_display_text(item.get("subject_layout")),
+                "action_timing": agent_display_text(item.get("action_timing")),
+                "shot_size_camera": agent_display_text(item.get("shot_size_camera")),
+                "lighting_color": agent_display_text(item.get("lighting_color")),
+                "transition": agent_display_text(item.get("transition")),
+                "target_mapping": existing_mapping.get(agent_display_text(item.get("source_time")))
+                or "严格保留该段画面几何、主体位置、动作时序、摄影与切镜，仅替换为项目人物身份和服装",
+            }
+            for item in segments
+            if isinstance(item, dict)
+        ],
+    })
+
+    for shot in result.get("shots", []):
+        if not isinstance(shot, dict):
+            continue
+        match = shot.get("reference_match")
+        if not isinstance(match, dict):
+            raise RuntimeError("分镜未绑定隔离分析得到的对标视频时间段，请重新分析")
+        source_time = agent_display_text(match.get("source_time"))
+        isolated = segment_by_time.get(source_time)
+        if not isinstance(isolated, dict):
+            raise RuntimeError(f"分镜引用了不存在的对标视频时间段：{source_time or '空'}")
+        shot["reference_match"] = {
+            "source_time": source_time,
+            "visual_blueprint": agent_display_text(isolated.get("visual_blueprint")),
+            "subject_layout": agent_display_text(isolated.get("subject_layout")),
+            "action_timing": agent_display_text(isolated.get("action_timing")),
+            "camera_motion": agent_display_text(isolated.get("shot_size_camera")),
+            "transition": agent_display_text(isolated.get("transition")),
+        }
+
+
 def finalize_agent_result(
     result: dict[str, Any],
     context: dict[str, Any],
@@ -1731,6 +1813,7 @@ def finalize_agent_result(
             cards.append(default_card)
     result["analysis_cards"] = cards[:4]
     normalize_agent_display_fields(result)
+    lock_result_to_isolated_reference(result, context)
     normalize_reference_breakdown(result, context)
     required_method_fields = {"composition", "camera", "lighting_color", "blocking", "rhythm"}
     corpus_ids = {str(item.get("id")) for item in context["corpus_retrieval"]["items"]}
@@ -1774,8 +1857,16 @@ def finalize_agent_result(
             if not isinstance(reference_match, dict) or not required_match_fields.issubset(reference_match) or any(not str(reference_match[key]).strip() for key in required_match_fields):
                 raise RuntimeError("分镜未写明对标视频画面复刻约束，请重新分析")
             source_time = str(reference_match["source_time"]).strip()
-            if source_time not in prompt:
-                prompt = f"[对标源时间段 {source_time}] {prompt}".strip()
+            locked_blueprint = (
+                f"[对标画面 {source_time}] "
+                f"画面：{reference_match['visual_blueprint']}；"
+                f"布局：{reference_match['subject_layout']}；"
+                f"动作：{reference_match['action_timing']}；"
+                f"摄影：{reference_match['camera_motion']}；"
+                f"衔接：{reference_match['transition']}。"
+            )
+            if any(str(reference_match[key]).strip() not in prompt for key in required_match_fields):
+                prompt = f"{locked_blueprint} {prompt}".strip()
         shot["prompt"] = prompt
     result["corpus_retrieval"] = context["corpus_retrieval"]
     result["material_manifest"] = {
@@ -1825,6 +1916,103 @@ def run_dsh_process(
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
+def analyze_reference_video_isolated(
+    reference_path: pathlib.Path,
+    reference_context: dict[str, Any],
+    directory: pathlib.Path,
+    environment: dict[str, str],
+) -> dict[str, Any]:
+    """在完全看不到人物图、导演库和项目要求的会话中拆解对标视频。"""
+    digest = hashlib.sha256()
+    with reference_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    cache_dir = DSH_HOME / "reference-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{digest.hexdigest()}.json"
+    if cache_path.is_file():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            cached_segments = cached.get("timeline_segments") if isinstance(cached, dict) else None
+            duration = float(reference_context.get("duration_seconds") or 0)
+            if isinstance(cached_segments, list) and reference_ranges_cover_video(cached_segments, duration):
+                return cached
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+
+    duration = float(reference_context.get("duration_seconds") or 0)
+    max_frames = 12 if duration <= 20 else 24
+    task = f"""你是对标视频拉片分析 Agent。本会话只能分析下面这个视频，禁止读取任何人物参考图、项目要求、导演库或电影语料：
+视频路径：{reference_path.resolve()}
+视频时长：{duration:.3f} 秒
+技术切点：{json.dumps(reference_context.get('scene_cut_times', []), ensure_ascii=False)}
+
+必须且只能调用一次 video_analyze，显式传 maxFrames={max_frames}，让采样覆盖完整视频。不要调用 read_image，不要猜测视频外的场景。
+先区分“视频真实可见的背景、人物、服装、道具、动作”和“后续项目要替换的内容”；本次只输出前者。
+按照真实动作变化、景别变化、运镜和切镜动态划分 3–10 个连续时间段，必须从 00:00.000 连续覆盖到 {format_timestamp(duration)}，不能留空档。
+每一段都要写出画面中实际看见的内容，不能使用人物参考图中的外貌、服装或背景，也不能加入导演风格。
+
+最终只输出一个合法 JSON 对象，不要 Markdown 或解释：
+{{
+  "reference_video_analysis": {{
+    "summary": "视频真实内容总览",
+    "subject_identity": "原视频主体的真实可见特征",
+    "environment": "原视频真实场景、背景和道具",
+    "shot_scale_pattern": "真实景别变化",
+    "camera_pattern": "真实机位、焦段感与运镜",
+    "lighting_color": "真实光线与色彩",
+    "editing_rhythm": "真实切点和节奏",
+    "timeline_segments": [{{
+      "source_time": "00:00.000–00:03.000",
+      "visual_blueprint": "该时间段实际可见画面",
+      "subject_layout": "主体数量、位置、朝向和前中后景关系",
+      "action_timing": "按时间顺序发生的真实动作",
+      "shot_size_camera": "景别、机位、焦段感和运镜",
+      "lighting_color": "该段真实光线与色彩",
+      "transition": "进入、退出或切镜方式"
+    }}]
+  }}
+}}
+"""
+    completed = run_dsh_process(
+        [DSH_COMMAND, "--profile", "headless", "-"],
+        input_text=task,
+        cwd=directory,
+        environment=environment,
+        timeout=None,
+    )
+    (directory / "reference-dsh-stdout.txt").write_text(completed.stdout or "", encoding="utf-8")
+    (directory / "reference-dsh-stderr.txt").write_text(completed.stderr or "", encoding="utf-8")
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "未知错误").strip()[-1600:]
+        raise RuntimeError(f"对标视频隔离分析失败：{detail}")
+    parsed = parse_agent_json(completed.stdout)
+    analysis = parsed.get("reference_video_analysis") if isinstance(parsed.get("reference_video_analysis"), dict) else parsed
+    segments = analysis.get("timeline_segments") if isinstance(analysis, dict) else None
+    high_level_fields = {
+        "summary", "subject_identity", "environment", "shot_scale_pattern",
+        "camera_pattern", "lighting_color", "editing_rhythm",
+    }
+    if not isinstance(analysis, dict) or any(not agent_display_text(analysis.get(key)) for key in high_level_fields):
+        raise RuntimeError("对标视频隔离分析未返回完整整体画面结论")
+    required = {"source_time", "visual_blueprint", "subject_layout", "action_timing", "shot_size_camera", "lighting_color", "transition"}
+    if not isinstance(segments, list) or not segments or any(
+        not isinstance(item, dict) or not required.issubset(item) or any(not agent_display_text(item.get(key)) for key in required)
+        for item in segments
+    ):
+        raise RuntimeError("对标视频隔离分析未返回完整逐段画面骨架")
+    normalized_segments = []
+    for item in segments:
+        normalized_segments.append({key: agent_display_text(item.get(key)) for key in required})
+    analysis["timeline_segments"] = normalized_segments
+    for key in high_level_fields:
+        analysis[key] = agent_display_text(analysis.get(key))
+    if not reference_ranges_cover_video(normalized_segments, duration):
+        raise RuntimeError("对标视频隔离分析未连续覆盖完整视频")
+    cache_path.write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+    return analysis
+
+
 def call_dsh_headless_agent(
     context: dict[str, Any],
     directory: pathlib.Path,
@@ -1833,6 +2021,10 @@ def call_dsh_headless_agent(
     if not dsh_is_available():
         raise RuntimeError("DSH Headless 未安装或 DSH_COMMAND 不可执行")
     DSH_HOME.mkdir(parents=True, exist_ok=True)
+    environment = os.environ.copy()
+    environment["DSH_HOME"] = str(DSH_HOME)
+    environment["HOME"] = str(DSH_HOME)
+    environment.setdefault("VIDEO_LENS_API_KEY", DEEPSEEK_API_KEY)
     reference_duration = float(context.get("reference_video", {}).get("duration_seconds") or 0)
     fast_video_path = bool(files.get("reference") and reference_duration <= 20)
     agent_context = json.loads(json.dumps(context, ensure_ascii=False))
@@ -1847,32 +2039,31 @@ def call_dsh_headless_agent(
                 compact_item["text"] = str(compact_item.get("text", ""))[:500]
                 compact_items.append(compact_item)
             retrieval["items"] = compact_items
+    all_files = {key: str((directory / filename).resolve()) for key, filename in files.items()}
+    reference_path = all_files.get("reference", "")
+    if reference_path:
+        isolated_analysis = analyze_reference_video_isolated(
+            pathlib.Path(reference_path),
+            agent_context["reference_video"],
+            directory,
+            environment,
+        )
+        agent_context["reference_video"]["isolated_analysis"] = isolated_analysis
+    # 第二阶段不暴露对标视频文件，只接收第一阶段锁定的结构化蓝图，避免再次读取时与人物图串料。
     manifest = {
         "context": agent_context,
-        "files": {key: str((directory / filename).resolve()) for key, filename in files.items()},
+        "files": {key: value for key, value in all_files.items() if key != "reference"},
     }
     manifest_path = directory / "agent-context.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    reference_path = manifest["files"].get("reference", "")
     portrait_paths = [
         value
         for key, value in manifest["files"].items()
         if key.startswith("portrait")
     ]
     if fast_video_path:
-        video_tool_rule = (
-            "不要调用 video_probe。且只调用一次 video_analyze，显式传 maxFrames=6。"
-            "禁止调用 video_ask，也不要重复调用 video_analyze；6 帧必须均匀覆盖整个视频并结合场景切点，"
-            "重点分析主体轨迹、逐拍动作、构图、景别、机位、运镜、光色与切镜。"
-            f"若有人物参考图，必须在同一个工具调用回合中并行调用 read_image：{json.dumps(portrait_paths, ensure_ascii=False)}。"
-        )
         output_rule = "shots 必须跟随真实动作阶段和切点动态分段，通常 4–8 项，不得为了缩短输出合并关键动作；每项 prompt 不超过 900 个汉字，其他单个文本字段不超过 220 个汉字。保持具体可执行，但不要重复同义描述。"
     else:
-        video_tool_rule = (
-            "先调用 video_probe，再且只调用一次 video_analyze，显式传 maxFrames=18。"
-            "只有 video_analyze 明确标记某个关键动作无法判断时，才允许调用一次 video_ask，"
-            "显式传 maxFrames=6；不得重复解码同一时间段。"
-        )
         output_rule = "根据实际音频、歌词和对标视频切点决定 shots 数量，避免重复同义描述。"
     compact_manifest = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
     task = f"""你是映流 MV 的制作总控 Agent。工作目录是 {directory.resolve()}。
@@ -1881,11 +2072,12 @@ def call_dsh_headless_agent(
 只使用上面真实存在的项目物料、导演库索引、电影语料检索结果和歌词时间轴。
 
 执行规则：
-1. 如果存在 reference 文件：{video_tool_rule} 最终按照 context.reference_video.segments 的全部精确时间段逐段组织结果，不能只描述第一帧。当前对标视频路径：{reference_path or '未提供'}。
-2. 人物参考图全部同级。使用 read_image 逐张检查人物外貌、服装和身份约束。
-3. 对标视频决定画面几何、动作、运镜和切镜；导演方法和电影语料只能增强光色、质感和叙事，不能覆盖对标结构。
-4. reference_breakdown.reference_shots 必须逐项覆盖 context.reference_video.segments，source_time 必须逐字复制，不能漏段。
+1. 如果 context.reference_video.isolated_analysis 存在，它是上一阶段只看对标视频得到的权威蓝图。禁止调用 video_probe、video_analyze 或 video_ask，也禁止重新解释对标视频；必须逐段复制 isolated_analysis.timeline_segments 的 source_time、visual_blueprint、subject_layout、action_timing、shot_size_camera、lighting_color 和 transition。
+2. 人物参考图全部同级。只允许使用 read_image 逐张检查人物外貌、服装和身份约束：{json.dumps(portrait_paths, ensure_ascii=False)}。人物图只能替换蓝图中的人物身份与服装，绝不能提供背景、动作、构图或摄影信息。
+3. 对标视频隔离蓝图决定画面几何、动作、运镜和切镜；导演方法和电影语料只能增强光色、质感和叙事，不能覆盖蓝图。
+4. reference_breakdown.reference_shots 必须逐项覆盖 context.reference_video.isolated_analysis.timeline_segments，source_time 必须逐字复制，不能漏段；每个 shots.reference_match 也必须引用其中一个完全相同的 source_time，并逐字继承该段画面约束。
 5. 每条 shots.prompt 必须以对应时间轴和歌词开头，并写入 reference_match.source_time；不得出现导演姓名、电影语料编号、字幕或水印。
+   若存在隔离蓝图，prompt 正文必须完整写入对应段的 visual_blueprint、subject_layout、action_timing、shot_size_camera 和 transition，而不是只写“参考对标视频”。
 6. 每镜 corpus_refs 至少选择 3 个 context.corpus_retrieval.items 中真实存在的 id，但这些 id 只能出现在 corpus_refs 元数据。
 7. 不要修改、删除或移动用户文件，不要发起视频生成。
 8. 输出规模：{output_rule}
@@ -1900,10 +2092,6 @@ director_application，shots。
 每个 shots 项必须含 id/time/title/lyrics_window、lyrics_sync（start/end/text/section/cut_on）、corpus_refs、reference_match（source_time/visual_blueprint/subject_layout/action_timing/camera_motion/transition）、director_method（composition/camera/lighting_color/blocking/rhythm）、prompt、negative_prompt。
 shots 必须覆盖完整规划时长，且每条 prompt 都必须独立完整。
 """
-    environment = os.environ.copy()
-    environment["DSH_HOME"] = str(DSH_HOME)
-    environment["HOME"] = str(DSH_HOME)
-    environment.setdefault("VIDEO_LENS_API_KEY", DEEPSEEK_API_KEY)
     completed = run_dsh_process(
         [DSH_COMMAND, "--profile", "headless", "-"],
         input_text=task,
@@ -1917,7 +2105,7 @@ shots 必须覆盖完整规划时长，且每条 prompt 都必须独立完整。
         detail = (completed.stderr or completed.stdout or "未知错误").strip()[-2000:]
         raise RuntimeError(f"DSH Headless 调用失败：{detail}")
     result = parse_agent_json(completed.stdout)
-    return finalize_agent_result(result, context, "DSH Headless", DEEPSEEK_MODEL)
+    return finalize_agent_result(result, agent_context, "DSH Headless", DEEPSEEK_MODEL)
 
 
 def call_deepseek_agent(context: dict[str, Any], image_inputs: list[dict[str, str]]) -> dict[str, Any]:
