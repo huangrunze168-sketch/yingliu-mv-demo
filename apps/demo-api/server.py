@@ -1590,9 +1590,8 @@ def run_dsh_process(
             os.killpg(process.pid, signal.SIGKILL)
         else:
             process.kill()
-        stdout, stderr = process.communicate()
-        detail = (stderr or stdout or "未返回日志").strip()[-1200:]
-        raise RuntimeError(f"DSH Headless 分析超过 {timeout} 秒，已终止全部子进程：{detail}") from exc
+        process.communicate()
+        raise RuntimeError(f"DSH Headless 分析超过 {timeout} 秒，已安全终止；请重试") from exc
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
@@ -1604,8 +1603,22 @@ def call_dsh_headless_agent(
     if not dsh_is_available():
         raise RuntimeError("DSH Headless 未安装或 DSH_COMMAND 不可执行")
     DSH_HOME.mkdir(parents=True, exist_ok=True)
+    reference_duration = float(context.get("reference_video", {}).get("duration_seconds") or 0)
+    fast_video_path = bool(files.get("reference") and reference_duration <= 20)
+    agent_context = json.loads(json.dumps(context, ensure_ascii=False))
+    if fast_video_path:
+        # DSH 每一个 Agent 步骤都会携带上下文。短视频只保留最高相关的 6 条语料，
+        # 避免同一批长文本在工具调用与最终输出阶段反复占用模型时间。
+        retrieval = agent_context.get("corpus_retrieval")
+        if isinstance(retrieval, dict) and isinstance(retrieval.get("items"), list):
+            compact_items = []
+            for item in retrieval["items"][:6]:
+                compact_item = dict(item)
+                compact_item["text"] = str(compact_item.get("text", ""))[:500]
+                compact_items.append(compact_item)
+            retrieval["items"] = compact_items
     manifest = {
-        "context": context,
+        "context": agent_context,
         "files": {key: str((directory / filename).resolve()) for key, filename in files.items()},
     }
     manifest_path = directory / "agent-context.json"
@@ -1616,21 +1629,21 @@ def call_dsh_headless_agent(
         for key, value in manifest["files"].items()
         if key.startswith("portrait")
     ]
-    reference_duration = float(context.get("reference_video", {}).get("duration_seconds") or 0)
-    fast_video_path = bool(reference_path and reference_duration <= 20)
     if fast_video_path:
         video_tool_rule = (
-            "不要调用 video_probe。且只调用一次 video_analyze，显式传 maxFrames=8。"
-            "禁止调用 video_ask，也不要重复调用 video_analyze；8 帧必须均匀覆盖整个视频并结合场景切点，"
+            "不要调用 video_probe。且只调用一次 video_analyze，显式传 maxFrames=6。"
+            "禁止调用 video_ask，也不要重复调用 video_analyze；6 帧必须均匀覆盖整个视频并结合场景切点，"
             "重点分析主体轨迹、逐拍动作、构图、景别、机位、运镜、光色与切镜。"
             f"若有人物参考图，必须在同一个工具调用回合中并行调用 read_image：{json.dumps(portrait_paths, ensure_ascii=False)}。"
         )
+        output_rule = "shots 最多 4 项；每项 prompt 不超过 900 个汉字，其他单个文本字段不超过 220 个汉字。保持具体可执行，但不要重复同义描述。"
     else:
         video_tool_rule = (
             "先调用 video_probe，再且只调用一次 video_analyze，显式传 maxFrames=18。"
             "只有 video_analyze 明确标记某个关键动作无法判断时，才允许调用一次 video_ask，"
             "显式传 maxFrames=6；不得重复解码同一时间段。"
         )
+        output_rule = "根据实际音频、歌词和对标视频切点决定 shots 数量，避免重复同义描述。"
     compact_manifest = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
     task = f"""你是映流 MV 的制作总控 Agent。工作目录是 {directory.resolve()}。
 项目上下文已经完整内嵌如下，不要再调用文件工具读取 agent-context.json：
@@ -1645,6 +1658,7 @@ def call_dsh_headless_agent(
 5. 每条 shots.prompt 必须以对应时间轴和歌词开头，并写入 reference_match.source_time；不得出现导演姓名、电影语料编号、字幕或水印。
 6. 每镜 corpus_refs 至少选择 3 个 context.corpus_retrieval.items 中真实存在的 id，但这些 id 只能出现在 corpus_refs 元数据。
 7. 不要修改、删除或移动用户文件，不要发起视频生成。
+8. 输出规模：{output_rule}
 
 最终只输出一个合法 JSON 对象，不要 Markdown、解释或第二个 JSON。必须包含：
 project_summary, creative_brief,
@@ -1665,7 +1679,7 @@ shots 必须覆盖完整规划时长，且每条 prompt 都必须独立完整。
         input_text=task,
         cwd=directory,
         environment=environment,
-        timeout=min(DSH_TIMEOUT_SECONDS, 120 if fast_video_path else 600),
+        timeout=min(DSH_TIMEOUT_SECONDS, 150 if fast_video_path else 600),
     )
     (directory / "agent-dsh-stdout.txt").write_text(completed.stdout or "", encoding="utf-8")
     (directory / "agent-dsh-stderr.txt").write_text(completed.stderr or "", encoding="utf-8")

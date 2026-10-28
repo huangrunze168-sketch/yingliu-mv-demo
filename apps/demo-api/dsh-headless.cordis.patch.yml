@@ -6,10 +6,10 @@
     visionModel: deepseek-flash
     visionApiKeyEnv: VIDEO_LENS_API_KEY
     maxFrames: 24
-    frameMaxWidth: 512
+    frameMaxWidth: 448
     frameQuality: 4
     sceneThreshold: 8
     askPaddingSec: 2
-    vlmMaxTokens: 1200
-    vlmTimeoutMs: 60000
+    vlmMaxTokens: 900
+    vlmTimeoutMs: 55000
     asrTimeoutMs: 120000
