@@ -669,7 +669,20 @@
   transition: transform 500ms ease, opacity 200ms ease;
 }
 
-.mv-project-card:hover .cover-thumb {
+.mv-project-video-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+  opacity: 0.88;
+  transform: scale(1.01);
+  transition: transform 500ms ease, opacity 200ms ease;
+}
+
+.mv-project-card:hover .cover-thumb,
+.mv-project-card:hover .mv-project-video-preview {
   opacity: 0.92;
   transform: scale(1.055);
 }

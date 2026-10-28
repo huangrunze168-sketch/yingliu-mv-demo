@@ -874,7 +874,18 @@ export function CreateFlowDemo() {
               {visibleProjects.map((project, index) => (
                 <article className="mv-project-card" key={project.id}>
                   <button className={`mv-project-cover mv-cover-tone-${index + 1}`} type="button" onClick={() => loadProject(project)} aria-label={`打开项目 ${project.name}`}>
-                    <CoverThumb seed={project.id} shots={project.shots} progress={project.progress} tone={index} />
+                    {project.result_url ? (
+                      <video
+                        className="mv-project-video-preview"
+                        src={`${project.result_url}#t=0.1`}
+                        muted
+                        playsInline
+                        preload="metadata"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <CoverThumb seed={project.id} shots={project.shots} progress={project.progress} tone={index} />
+                    )}
                     <span className="mv-project-cover-veil" />
                     <span className="mv-project-state">{project.status}</span>
                     <span className="mv-project-ratio">{project.ratio}</span>
