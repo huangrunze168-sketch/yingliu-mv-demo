@@ -160,6 +160,41 @@ class ModelsNexusAdapterTests(unittest.TestCase):
                 )
         api_json.assert_not_called()
 
+    def test_recover_known_failed_task_uses_saved_task_id(self) -> None:
+        state = {
+            "status": "failed", "model": "sd2.5海外版-480p",
+            "upstream_tasks": {"clip-try01": {
+                "id": "task-saved", "status": "failed", "submission_state": "submitted",
+            }},
+        }
+
+        def fake_write_state(_job_id: str, **updates):
+            state.update(updates)
+            return dict(state)
+
+        with patch.object(server, "read_state", return_value=state), \
+             patch.object(server, "write_state", side_effect=fake_write_state), \
+             patch.object(server, "MODELSNEXUS_API_KEY", "test-key"), \
+             patch.object(server, "api_json", return_value={"data": {
+                 "id": "task-saved", "status": "failed", "progress": 100,
+             }}):
+            result = server.recover_known_failed_video_task("job-1")
+
+        self.assertTrue(result["can_retry"])
+        self.assertTrue(result["retry_token"])
+        self.assertEqual(state["upstream_tasks"]["clip-try01"]["submission_state"], "rejected")
+
+    def test_recover_524_without_task_id_remains_locked(self) -> None:
+        state = {
+            "status": "failed", "model": "sd2.5海外版-480p",
+            "upstream_tasks": {"clip-try01": {
+                "request_id": "request-524", "submission_state": "unknown",
+            }},
+        }
+        with patch.object(server, "read_state", return_value=state):
+            with self.assertRaisesRegex(ValueError, "没有返回可查询的 task_id"):
+                server.recover_known_failed_video_task("job-1")
+
     def test_reference_builder_only_returns_typed_urls(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = pathlib.Path(temporary)

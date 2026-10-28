@@ -989,6 +989,53 @@ def adopt_failed_video_task(job_id: str, upstream_id: str, new_client_request_id
     return updated
 
 
+def recover_known_failed_video_task(job_id: str) -> dict[str, Any]:
+    """自动使用服务器已保存的 task_id 核验，网页用户无需提供内部任务编号。"""
+    state = read_state(job_id)
+    if state.get("status") != "failed":
+        raise ValueError("当前生成任务不是失败状态，无需恢复")
+    tasks = state.get("upstream_tasks") if isinstance(state.get("upstream_tasks"), dict) else {}
+    failed_ids = [
+        str(item.get("id")) for item in tasks.values()
+        if isinstance(item, dict) and item.get("id")
+        and str(item.get("status") or "").lower() in {"failed", "cancelled", "canceled", "error"}
+    ]
+    known_ids = [str(item.get("id")) for item in tasks.values() if isinstance(item, dict) and item.get("id")]
+    candidates = list(dict.fromkeys(failed_ids or known_ids))
+    if len(candidates) != 1:
+        request_ids = [item.get("request_id") for item in tasks.values() if isinstance(item, dict) and item.get("request_id")]
+        if request_ids and not candidates:
+            raise ValueError(
+                "ModelsNexus 网关超时时没有返回可查询的 task_id，官方 API 也不支持按 request_id 找回；"
+                "系统已继续锁定该请求以避免重复扣费"
+            )
+        raise ValueError("当前项目没有唯一的 ModelsNexus 失败任务，无法自动安全重试")
+    upstream_id = candidates[0]
+    model = upstream_model_name(state)
+    adapter = video_model_adapter(model)
+    api_key = MODELSNEXUS_API_KEY if adapter.family == "seedance" else MINIMAX_API_KEY
+    if not api_key:
+        raise RuntimeError("ModelsNexus API 未配置")
+    response = api_json(urllib.request.Request(
+        adapter.status_url(upstream_id), headers=modelsnexus_headers(api_key),
+    ), timeout=60)
+    status, progress = adapter.status(response)
+    if status not in {"failed", "cancelled", "canceled", "error"}:
+        raise ValueError(f"ModelsNexus 任务当前为 {status or '未知'}，尚不能重新提交")
+    task_key = next(key for key, item in tasks.items() if isinstance(item, dict) and item.get("id") == upstream_id)
+    tasks[task_key].update({"status": status, "progress": progress, "submission_state": "rejected"})
+    retry_token = secrets.token_urlsafe(32)
+    updated = write_state(
+        job_id, upstream_tasks=tasks, status="failed", submission_state="rejected",
+        stage="ModelsNexus 已确认失败，可安全重新提交",
+        error=f"ModelsNexus 任务已失败：{adapter.error_message(response)}",
+        upstream_status=status, can_retry=True,
+        retry_token_sha256=hashlib.sha256(retry_token.encode("utf-8")).hexdigest(),
+    )
+    updated["retry_token"] = retry_token
+    return updated
+
+
 def retry_confirmed_failed_job(job_id: str, retry_token: str) -> dict[str, Any]:
     """仅对已核验失败的任务创建新尝试；旧任务记录永久归档。"""
     state = read_state(job_id)
@@ -2684,15 +2731,32 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format_string: str, *args: Any) -> None:
         print(f"[{self.log_date_time_string()}] {format_string % args}", flush=True)
 
-    def send_json(self, status: int, payload: dict[str, Any]) -> None:
+    def send_json(self, status: int, payload: dict[str, Any], extra_headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
+
+    def has_job_recovery_access(self, job_id: str, state: dict[str, Any], client_request_id: str) -> bool:
+        if client_request_id and secrets.compare_digest(client_request_id, str(state.get("client_request_id", ""))):
+            return True
+        cookie_header = self.headers.get("Cookie", "")
+        cookie_name = f"ylr_{job_id}"
+        cookie_value = ""
+        for part in cookie_header.split(";"):
+            name, separator, value = part.strip().partition("=")
+            if separator and name == cookie_name:
+                cookie_value = value
+                break
+        expected_hash = str(state.get("recovery_cookie_sha256") or "")
+        actual_hash = hashlib.sha256(cookie_value.encode("utf-8")).hexdigest()
+        return bool(cookie_value and expected_hash and secrets.compare_digest(expected_hash, actual_hash))
 
     def serve_signed_asset(self, path: str, include_body: bool = True) -> bool:
         """向上游提供带 Range/HEAD 的短时素材地址；返回是否命中素材路由。"""
@@ -2813,7 +2877,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         request_path = urlparse(self.path).path.rstrip("/")
-        recovery_match = re.fullmatch(r"/jobs/([0-9a-f]{32})/(reconcile|adopt|retry)", request_path)
+        recovery_match = re.fullmatch(r"/jobs/([0-9a-f]{32})/(reconcile|adopt|recover|retry)", request_path)
         if recovery_match:
             try:
                 job_id, action = recovery_match.groups()
@@ -2823,11 +2887,11 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
                 state = read_state(job_id)
                 client_request_id = str(payload.get("client_request_id", ""))
-                if action != "adopt" and not secrets.compare_digest(
-                    client_request_id, str(state.get("client_request_id", ""))
-                ):
+                if not self.has_job_recovery_access(job_id, state, client_request_id):
                     raise PermissionError("无权恢复该生成任务")
-                if action in {"reconcile", "adopt"}:
+                if action == "recover":
+                    result = recover_known_failed_video_task(job_id)
+                elif action in {"reconcile", "adopt"}:
                     upstream_id = str(payload.get("upstream_task_id", "")).strip()[:200]
                     if not upstream_id.startswith("task_"):
                         raise ValueError("请输入 ModelsNexus 任务详情中的 task_id")
@@ -2911,6 +2975,7 @@ class Handler(BaseHTTPRequestHandler):
                 request_index.write_text(job_id, encoding="utf-8")
             directory = job_dir(job_id)
             directory.mkdir(mode=0o750)
+            recovery_cookie = secrets.token_urlsafe(32)
             files: dict[str, str] = {}
             try:
                 for key in ALLOWED_EXTENSIONS:
@@ -2941,6 +3006,7 @@ class Handler(BaseHTTPRequestHandler):
                     "requirements": str(form.getfirst("requirements", ""))[:20000],
                     "generation_plan": generation_plan,
                     "client_request_id": client_request_id,
+                    "recovery_cookie_sha256": hashlib.sha256(recovery_cookie.encode("utf-8")).hexdigest(),
                     "generation_attempt": 1,
                     "submission_state": "not_started",
                     "files": files,
@@ -2951,7 +3017,14 @@ class Handler(BaseHTTPRequestHandler):
                 shutil.rmtree(directory, ignore_errors=True)
                 request_index.unlink(missing_ok=True)
                 raise
-            self.send_json(HTTPStatus.ACCEPTED, {"id": job_id, "status": "queued", "progress": 5})
+            self.send_json(
+                HTTPStatus.ACCEPTED,
+                {"id": job_id, "status": "queued", "progress": 5},
+                {"Set-Cookie": (
+                    f"ylr_{job_id}={recovery_cookie}; Path=/yingliu-demo-api/jobs/{job_id}; "
+                    "Max-Age=86400; HttpOnly; Secure; SameSite=Strict"
+                )},
+            )
         except ValueError as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception as exc:  # noqa: BLE001

@@ -297,7 +297,6 @@ export function CreateFlowDemo() {
   const [runStage, setRunStage] = useState('等待提交生成任务');
   const [job, setJob] = useState<DemoJob | null>(null);
   const [notice, setNotice] = useState('');
-  const [upstreamTaskId, setUpstreamTaskId] = useState('');
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [retryToken, setRetryToken] = useState('');
   const [agentAnalyzing, setAgentAnalyzing] = useState(false);
@@ -406,20 +405,17 @@ export function CreateFlowDemo() {
   }, [job?.id, job?.status]);
 
   const reconcileFailedGeneration = async () => {
-    if (!job || !upstreamTaskId.trim()) return;
+    if (!job) return;
     setRecoveryBusy(true);
     try {
-      const newClientRequestId = submissionRequestIdRef.current || createClientRequestId();
-      const response = await fetch(`/yingliu-demo-api/jobs/${job.id}/adopt`, {
+      const response = await fetch(`/yingliu-demo-api/jobs/${job.id}/recover`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          upstream_task_id: upstreamTaskId.trim(),
-          new_client_request_id: newClientRequestId,
+          client_request_id: submissionRequestIdRef.current || '',
         }),
       });
       const payload = await response.json() as DemoJob & { error?: string };
       if (!response.ok) throw new Error(payload.error || '上游任务核验失败');
-      submissionRequestIdRef.current = newClientRequestId;
       setJob(payload);
       if (payload.retry_token) setRetryToken(payload.retry_token);
       setNotice(payload.can_retry
@@ -434,13 +430,13 @@ export function CreateFlowDemo() {
   };
 
   const retryConfirmedGeneration = async () => {
-    if (!job || !submissionRequestIdRef.current || !job.can_retry) return;
+    if (!job || !job.can_retry) return;
     if (!window.confirm('ModelsNexus 已确认上一任务失败并退款。是否创建新的生成任务？本次可能重新产生费用。')) return;
     setRecoveryBusy(true);
     try {
       const response = await fetch(`/yingliu-demo-api/jobs/${job.id}/retry`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ client_request_id: submissionRequestIdRef.current, retry_token: retryToken }),
+        body: JSON.stringify({ client_request_id: submissionRequestIdRef.current || '', retry_token: retryToken }),
       });
       const payload = await response.json() as DemoJob & { error?: string };
       if (!response.ok) throw new Error(payload.error || '重新提交失败');
@@ -1021,7 +1017,7 @@ export function CreateFlowDemo() {
                 <div className="mv-phase-progress"><article className={uploadProgress >= 100 ? 'is-done' : running && !job ? 'is-active' : ''}><header><b>01 素材上传</b><em>{uploadProgress}%</em></header><i><span style={{ width: `${uploadProgress}%` }} /></i></article><article className={job?.status === 'completed' ? 'is-done' : running && Boolean(job) ? 'is-active' : ''}><header><b>02 视频生成</b><em>{job?.status === 'completed' ? 100 : job?.progress || 0}%</em></header><i><span style={{ width: `${job?.status === 'completed' ? 100 : job?.progress || 0}%` }} /></i></article></div>
                 <div className="mv-pipeline-status">{['素材校验', '需求分析', '对标拆解', 'ZY 分镜', '视频生成', 'AI 质检', '成片交付'].map((label, index) => { const done = runProgress >= (index + 1) * (100 / 7); return <span className={done ? 'is-done' : ''} key={label}>{done ? '✓' : index + 1} {label}</span>; })}</div>
               </div>
-              {job?.status === 'failed' && !job.can_retry && <section className="mv-upstream-recovery"><div><b>认领 ModelsNexus 失败任务</b><p>从 ModelsNexus 任务详情复制 task_id。系统会先查询并确认它确实失败，不会在这一步重新生成。</p></div><div className="mv-upstream-recovery-form"><input value={upstreamTaskId} onChange={event => setUpstreamTaskId(event.target.value)} placeholder="task_..." aria-label="ModelsNexus task_id" /><button className="button button-secondary" type="button" disabled={recoveryBusy || !upstreamTaskId.trim()} onClick={() => void reconcileFailedGeneration()}>{recoveryBusy ? '核验中…' : '核验并解锁重试'}</button></div></section>}
+              {job?.status === 'failed' && !job.can_retry && <section className="mv-upstream-recovery"><div><b>自动检查 ModelsNexus 失败任务</b><p>后台会使用服务器保存的任务记录自动核验，无需提供 task_id，检查阶段不会重新生成。</p></div><div className="mv-upstream-recovery-form"><button className="button button-secondary" type="button" disabled={recoveryBusy} onClick={() => void reconcileFailedGeneration()}>{recoveryBusy ? '自动核验中…' : '自动检查并解锁重试'}</button></div></section>}
               {job?.status === 'failed' && job.can_retry && <section className="mv-upstream-recovery is-confirmed"><div><b>上游已确认失败</b><p>旧任务与退款记录已保留。重新提交会使用新的幂等键，不会复用失败任务。</p></div><button className="button button-primary" type="button" disabled={recoveryBusy || !retryToken} onClick={() => void retryConfirmedGeneration()}>{recoveryBusy ? '提交中…' : '重新提交生成'}</button></section>}
             </section>
             <aside className="create-side"><div className="create-analysis"><p className="overline">PLAYBACK & DELIVERY</p><h2>播放与交付</h2><ul className="summary-list"><li><span>项目</span><b>{projectName}</b></li><li><span>视频规格</span><b>{ratio} · {resolution}</b></li><li><span>生成模型</span><b>{model}</b></li><li><span>导演方法</span><b>{director}</b></li><li><span>总时长</span><b>{durationLabel}</b></li><li><span>在线播放</span><b className={job?.status === 'completed' ? 'status-ready' : ''}>{job?.status === 'completed' ? '可观看' : '等待成片'}</b></li><li><span>音轨</span><b className={job?.status === 'completed' ? 'status-ready' : ''}>{job?.status === 'completed' ? '已封装' : '待处理'}</b></li></ul><button className="button button-primary export-button" type="button" onClick={() => void startDemoRun()} disabled={running}>{running ? job ? `视频生成中 ${job.progress || 0}%` : `素材上传中 ${uploadProgress}%` : job?.status === 'completed' ? '重新生成播放预览' : '生成可播放预览'}</button>{running && <div className="mv-button-progress"><span style={{ width: `${runProgress}%` }} /></div>}</div></aside>
