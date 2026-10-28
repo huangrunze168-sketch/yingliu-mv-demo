@@ -1468,14 +1468,38 @@ def parse_agent_json(content: str) -> dict[str, Any]:
             continue
         if isinstance(value, dict):
             objects.append(value)
+            # DSH 的事件流偶尔会把最终对象包在 result/data/output 中。
+            # 把直接嵌套的对象也作为候选，后面按完整度选择，而不是盲目取第一个工具结果。
+            for nested in value.values():
+                if isinstance(nested, dict):
+                    objects.append(nested)
         position = max(end, start + 1)
 
     if not objects:
         raise RuntimeError("DeepSeek 返回内容不是合法 JSON，请重试")
 
-    # 第一个对象通常是完整主结果；后续对象仅补齐缺失字段，避免覆盖已生成内容。
-    result = dict(objects[0])
-    for extra in objects[1:]:
+    def completeness_score(item: dict[str, Any]) -> tuple[int, int]:
+        score = 0
+        shots = item.get("shots")
+        if isinstance(shots, list) and shots:
+            score += 40 + min(len(shots), 12)
+        elif isinstance(shots, dict) and shots:
+            score += 35
+        cards = item.get("analysis_cards")
+        if isinstance(cards, list) and cards:
+            score += 20 + min(len(cards), 4)
+        for key, weight in (
+            ("project_summary", 4), ("creative_brief", 4), ("timeline", 4),
+            ("reference_breakdown", 12), ("director_application", 6),
+            ("corpus_retrieval", 6), ("material_observations", 4),
+        ):
+            if item.get(key) not in (None, "", [], {}):
+                score += weight
+        return score, len(item)
+
+    ranked = sorted(objects, key=completeness_score, reverse=True)
+    result = dict(ranked[0])
+    for extra in ranked[1:]:
         for key, value in extra.items():
             if key not in result or result[key] in (None, "", [], {}):
                 result[key] = value
@@ -1664,10 +1688,48 @@ def finalize_agent_result(
             result[key] = []
         elif not isinstance(value, list):
             result[key] = [value]
-    cards = result.get("analysis_cards")
     shots = result.get("shots")
-    if not isinstance(cards, list) or len(cards) != 4 or not isinstance(shots, list) or len(shots) < 1:
+    if shots in (None, "", [], {}):
+        shots = result.get("storyboard") or result.get("shot_list")
+    if isinstance(shots, dict):
+        shots = list(shots.values())
+    result["shots"] = shots if isinstance(shots, list) else []
+    if not result["shots"]:
         raise RuntimeError(f"{provider} 返回结构不完整，请重试")
+    cards = result.get("analysis_cards")
+    if isinstance(cards, dict):
+        cards = list(cards.values())
+    if not isinstance(cards, list):
+        cards = []
+    default_cards = [
+        {
+            "title": "需求理解",
+            "value": "制作目标已读取",
+            "copy": str(context.get("requirements") or "未填写制作要求")[:500],
+        },
+        {
+            "title": "歌曲歌词",
+            "value": f"{float(context.get('duration') or 0):.2f} 秒",
+            "copy": "已提供歌词并建立时间轴" if context.get("has_lyrics") else "未提供歌词，按纯音乐规划",
+        },
+        {
+            "title": "人物参考图",
+            "value": f"{int(context.get('portrait_count') or 0)} 张同级参考图",
+            "copy": "全部人物参考图同级参与身份一致性约束" if context.get("portrait_count") else "未提供人物参考图",
+        },
+        {
+            "title": "对标视频与镜头策略",
+            "value": "已逐段拆解" if context.get("has_reference") else "未提供对标视频",
+            "copy": "对标视频决定画面、动作、运镜与切镜" if context.get("has_reference") else "由需求、导演库和电影语料补全镜头策略",
+        },
+    ]
+    existing_titles = {str(item.get("title", "")) for item in cards if isinstance(item, dict)}
+    for default_card in default_cards:
+        if len(cards) >= 4:
+            break
+        if default_card["title"] not in existing_titles:
+            cards.append(default_card)
+    result["analysis_cards"] = cards[:4]
     normalize_agent_display_fields(result)
     normalize_reference_breakdown(result, context)
     required_method_fields = {"composition", "camera", "lighting_color", "blocking", "rhythm"}

@@ -26,12 +26,18 @@ class AgentJsonParserTests(unittest.TestCase):
         content = '{"creative_brief": "画面包含 {门框}，但仍是合法字符串"} trailing'
         self.assertEqual(server.parse_agent_json(content)["creative_brief"], "画面包含 {门框}，但仍是合法字符串")
 
-    def test_merges_only_missing_fields_from_concatenated_objects(self) -> None:
+    def test_prefers_most_complete_concatenated_object(self) -> None:
         content = '{"project_summary":"主结果","shots":[]}\n{"project_summary":"不得覆盖","shots":[{"id":"SH01"}],"timeline":[]}'
         result = server.parse_agent_json(content)
-        self.assertEqual(result["project_summary"], "主结果")
+        self.assertEqual(result["project_summary"], "不得覆盖")
         self.assertEqual(result["shots"][0]["id"], "SH01")
         self.assertEqual(result["timeline"], [])
+
+    def test_unwraps_dsh_event_result(self) -> None:
+        content = '{"event":"tool","data":{"frames":6}}\n{"event":"final","result":{"project_summary":"完成","analysis_cards":[{"title":"需求"}],"shots":[{"id":"SH01"}]}}'
+        result = server.parse_agent_json(content)
+        self.assertEqual(result["project_summary"], "完成")
+        self.assertEqual(result["shots"][0]["id"], "SH01")
 
     def test_rejects_non_json_output(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "不是合法 JSON"):
